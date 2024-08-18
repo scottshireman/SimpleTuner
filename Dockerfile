@@ -59,7 +59,7 @@ RUN pip3 install wandb
 RUN pop 3 install ipyevents ipywidgets jupyter-archive jupyterlab
 
 # Clone SimpleTuner
-RUN git clone https://github.com/bghira/SimpleTuner --branch release
+RUN git clone https://github.com/scopttshireman/SimpleTuner --branch release
 # RUN git clone https://github.com/bghira/SimpleTuner --branch main # Uncomment to use latest (possibly unstable) version
 
 # Install SimpleTuner
