@@ -41,6 +41,7 @@ RUN apt-get install -y python3.10-venv
 
 # Ensure SSH access. Not needed for Runpod but is required on Vast and other Docker hosts
 EXPOSE 22/tcp
+EXPOSE 8888/tcp
 
 # Python
 RUN apt-get update -y && apt-get install -y python3 python3-pip
