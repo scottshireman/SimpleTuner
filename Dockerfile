@@ -56,7 +56,7 @@ RUN pip3 install "huggingface_hub[cli]"
 RUN pip3 install wandb
 
 # Jupyter notebooks
-RUN pop 3 install ipyevents ipywidgets jupyter-archive jupyterlab
+RUN pip3 install ipyevents ipywidgets jupyter-archive jupyterlab
 
 # Clone SimpleTuner
 RUN git clone https://github.com/scopttshireman/SimpleTuner --branch release
