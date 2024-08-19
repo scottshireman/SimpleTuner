@@ -68,8 +68,11 @@ RUN cd SimpleTuner && python3 -m venv .venv && poetry install --no-root
 RUN chmod +x SimpleTuner/train.sh
 
 ADD docker-start.sh /
+RUN chmod +x /docker-start.sh
+CMD [ "/docker-start.sh" ]
+
 # Copy start script with exec permissions
-COPY --chmod=755 /docker-start.sh /start.sh
+#COPY --chmod=755 /docker-start.sh /start.sh
 
 # Dummy entrypoint
-ENTRYPOINT [ "/start.sh" ]
+#ENTRYPOINT [ "/start.sh" ]
