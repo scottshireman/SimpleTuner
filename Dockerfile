@@ -67,6 +67,7 @@ RUN pip3 install poetry
 RUN cd SimpleTuner && python3 -m venv .venv && poetry install --no-root
 RUN chmod +x SimpleTuner/train.sh
 
+WORKDIR /workspace/SimpleTuner
 ADD docker-start.sh /
 RUN chmod +x /docker-start.sh
 CMD [ "/docker-start.sh" ]
