@@ -73,7 +73,7 @@ RUN pip3 install poetry
 RUN git clone https://github.com/scottshireman/SimpleTuner --branch main
 # RUN git clone https://github.com/bghira/SimpleTuner --branch main # Uncomment to use latest (possibly unstable) version
 
-ENV VIRTUAL_ENV=/workspace/venv
+ENV VIRTUAL_ENV=/workspace/SimpleTuner/.venv
 ENV PATH="$VIRTUAL_ENV/bin:$PATH"
 
 RUN python3 -m venv ${VIRTUAL_ENV} && \
