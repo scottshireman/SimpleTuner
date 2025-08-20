@@ -76,8 +76,7 @@ RUN git clone https://github.com/scottshireman/SimpleTuner --branch main
 ENV VIRTUAL_ENV=/workspace/venv
 ENV PATH="$VIRTUAL_ENV/bin:$PATH"
 
-RUN --mount=type=cache,target=/root/.cache/pip \
-    python3 -m venv ${VIRTUAL_ENV} && \
+RUN python3 -m venv ${VIRTUAL_ENV} && \
     pip3 install --pre torch torchvision --index-url https://download.pytorch.org/whl/cu128 # && \
     #pip install -U xformers --index-url https://download.pytorch.org/whl/cu128 && \
 
