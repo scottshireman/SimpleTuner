@@ -48,7 +48,7 @@ if [[ -n "${JUPYTER_PASSWORD:-}" ]]; then
   jupyter nbextension enable --py widgetsnbextension || true
   jupyter labextension disable "@jupyterlab/apputils-extension:announcements" || true
 
-  exec jupyter lab \
+  jupyter lab \
     --allow-root \
     --no-browser \
     --port=8888 \
