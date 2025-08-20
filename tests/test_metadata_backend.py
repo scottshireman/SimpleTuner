@@ -1,7 +1,7 @@
 import unittest, json
 from PIL import Image
 from unittest.mock import Mock, patch, MagicMock
-from helpers.metadata.backends.json import JsonMetadataBackend
+from helpers.metadata.backends.discovery import DiscoveryMetadataBackend
 from helpers.training.state_tracker import StateTracker
 from tests.helpers.data import MockDataBackend
 
@@ -22,7 +22,7 @@ class TestMetadataBackend(unittest.TestCase):
         self.image_path_str = "test_image.jpg"
 
         self.instance_data_dir = "/some/fake/path"
-        self.cache_file = "/some/fake/cache.json"
+        self.cache_file = "/some/fake/cache"
         self.metadata_file = "/some/fake/metadata.json"
         StateTracker.set_args(MagicMock())
         # Overload cache file with json:
@@ -30,8 +30,8 @@ class TestMetadataBackend(unittest.TestCase):
             "helpers.training.state_tracker.StateTracker._save_to_disk",
             return_value=True,
         ), patch("pathlib.Path.exists", return_value=True):
-            with self.assertLogs("JsonMetadataBackend", level="WARNING"):
-                self.metadata_backend = JsonMetadataBackend(
+            with self.assertLogs("DiscoveryMetadataBackend", level="WARNING"):
+                self.metadata_backend = DiscoveryMetadataBackend(
                     id="foo",
                     instance_data_dir=self.instance_data_dir,
                     cache_file=self.cache_file,
@@ -90,7 +90,7 @@ class TestMetadataBackend(unittest.TestCase):
     def test_load_cache_invalid(self):
         invalid_cache_data = "this is not valid json"
         with patch.object(self.data_backend, "read", return_value=invalid_cache_data):
-            with self.assertLogs("JsonMetadataBackend", level="WARNING"):
+            with self.assertLogs("DiscoveryMetadataBackend", level="WARNING"):
                 self.metadata_backend.reload_cache()
 
     def test_save_cache(self):
@@ -100,6 +100,47 @@ class TestMetadataBackend(unittest.TestCase):
         with patch.object(self.data_backend, "write") as mock_write:
             self.metadata_backend.save_cache()
         mock_write.assert_called_once()
+
+    def test_minimum_aspect_size(self):
+        # when metadata_backend.minimum_aspect_ratio is not None and > 0.0 it will remove buckets from the list.
+        # this test ensures that the bucket is removed when the value is set correctly.
+        self.metadata_backend.aspect_ratio_bucket_indices = {
+            "1.0": ["image1", "image2"],
+            "1.5": ["image3"],
+        }
+        self.metadata_backend.minimum_aspect_ratio = 1.25
+        self.metadata_backend._enforce_min_aspect_ratio()
+        self.assertEqual(
+            self.metadata_backend.aspect_ratio_bucket_indices, {"1.5": ["image3"]}
+        )
+
+    def test_maximum_aspect_size(self):
+        # when metadata_backend.maximum_aspect_ratio is not None and > 0.0 it will remove buckets from the list.
+        # this test ensures that the bucket is removed when the value is set correctly.
+        self.metadata_backend.aspect_ratio_bucket_indices = {
+            "1.0": ["image1", "image2"],
+            "1.5": ["image3"],
+        }
+        self.metadata_backend.maximum_aspect_ratio = 1.25
+        self.metadata_backend._enforce_max_aspect_ratio()
+        self.assertEqual(
+            self.metadata_backend.aspect_ratio_bucket_indices,
+            {"1.0": ["image1", "image2"]},
+        )
+
+    def test_unbound_aspect_list(self):
+        # when metadata_backend.maximum_aspect_ratio is None and metadata_backend.minimum_aspect_ratio is None
+        # the aspect_ratio_bucket_indices should not be modified.
+        self.metadata_backend.aspect_ratio_bucket_indices = {
+            "1.0": ["image1", "image2"],
+            "1.5": ["image3"],
+        }
+        self.metadata_backend._enforce_min_aspect_ratio()
+        self.metadata_backend._enforce_max_aspect_ratio()
+        self.assertEqual(
+            self.metadata_backend.aspect_ratio_bucket_indices,
+            {"1.0": ["image1", "image2"], "1.5": ["image3"]},
+        )
 
 
 if __name__ == "__main__":

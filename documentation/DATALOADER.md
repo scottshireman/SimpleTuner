@@ -14,6 +14,8 @@ Here is the most basic example of a dataloader configuration file, as `multidata
     "resolution": 1024,
     "minimum_image_size": 768,
     "maximum_image_size": 2048,
+    "minimum_aspect_ratio": 0.50,
+    "maximum_aspect_ratio": 3.00,
     "target_downsample_size": 1024,
     "resolution_type": "pixel_area",
     "prepend_instance_prompt": false,
@@ -47,9 +49,10 @@ Here is the most basic example of a dataloader configuration file, as `multidata
 
 ### `dataset_type`
 
-- **Values:** `image` | `text_embeds` | `image_embeds`
-- **Description:** `image` datasets contain your training data. `text_embeds` contain the outputs of the text encoder cache, and `image_embeds` contain the VAE outputs, if the model uses one.
+- **Values:** `image` | `video` | `text_embeds` | `image_embeds` | `conditioning`
+- **Description:** `image` and `video` datasets contain your training data. `text_embeds` contain the outputs of the text encoder cache, and `image_embeds` contain the VAE outputs, if the model uses one. When a dataset is marked as `conditioning`, it is possible to pair it to your `image` dataset via [the conditioning_data option](#conditioning_data)
 - **Note:** Text and image embed datasets are defined differently than image datasets are. A text embed dataset stores ONLY the text embed objects. An image dataset stores the training data.
+- **Note:** Don't combine images and video in a **single** dataset. Split them out.
 
 ### `default`
 
@@ -71,6 +74,17 @@ Here is the most basic example of a dataloader configuration file, as `multidata
 - **Values:** `aws` | `local` | `csv`
 - **Description:** Determines the storage backend (local, csv or cloud) used for this dataset.
 
+### `conditioning_type`
+
+- **Values:** `controlnet` | `mask`
+- **Description:** A dataset may contain ControlNet conditioning inputs or masks to use during loss calculations. Only one or the other may be used.
+
+### `conditioning_data`
+
+- **Values:** `id` value of conditioning dataset or an array of `id` values
+- **Description:** As described in [the ControlNet guide](/documentation/CONTROLNET.md), an `image` dataset can be paired to its ControlNet or image mask data via this option.
+- **Note:** If you have multiple conditioning datasets, you can specify them as an array of `id` values. When training Flux Kontext, this allows switching between conditions randomly or stitching inputs together to train in more advanced multi-image compositing tasks.
+
 ### `instance_data_dir` / `aws_data_prefix`
 
 - **Local:** Path to the data on the filesystem.
@@ -78,8 +92,8 @@ Here is the most basic example of a dataloader configuration file, as `multidata
 
 ### `caption_strategy`
 
-- **textfile** requires your image.png be next to an image.txt that contains one or more captions, separated by newlines.
-- **instance_prompt** requires a value for `instance_prompt` also be provided, and will use **only** this value for the caption of every image in the set.
+- **textfile** requires your image.png be next to an image.txt that contains one or more captions, separated by newlines. These image+text pairs **must be in the same directory**.
+- **instanceprompt** requires a value for `instance_prompt` also be provided, and will use **only** this value for the caption of every image in the set.
 - **filename** will use a converted and cleaned-up version of the filename as its caption, eg. after swapping underscores for spaces.
 - **parquet** will pull captions from the parquet table that contains the rest of the image metadata. use the `parquet` field to configure this. See [Parquet caption strategy](#parquet-caption-strategy--json-lines-datasets).
 
@@ -91,24 +105,228 @@ Both `textfile` and `parquet` support multi-captions:
 
 - `crop`: Enables or disables image cropping.
 - `crop_style`: Selects the cropping style (`random`, `center`, `corner`, `face`).
-- `crop_aspect`: Chooses the cropping aspect (`random`, `square` or `preserve`).
-- `crop_aspect_buckets`: When `crop_aspect` is set to `random`, a bucket from this list will be selected, so long as the resulting image size would not result more than 20% upscaling.
+- `crop_aspect`: Chooses the cropping aspect (`closest`, `random`, `square` or `preserve`).
+- `crop_aspect_buckets`: When `crop_aspect` is set to `closest` or `random`, a bucket from this list will be selected, so long as the resulting image size would not result more than 20% upscaling.
 
 ### `resolution`
 
-- **Area-Based:** Cropping/sizing is done by megapixel count.
-- **Pixel-Based:** Resizing or cropping uses the smaller edge as the basis for calculation.
+- **resolution_type=area:** The final image size is determined by megapixel count - a value of 1.05 here will correspond to aspect buckets around 1024^2 (1024x1024) total pixel area, ~1_050_000 pixels.
+- **resolution_type=pixel_area:** Like `area`, the final image size is by its area, but measures in pixels rather than megapixels. A value of 1024 here will generate aspect buckets around 1024^2 (1024x1024) total pixel area, ~1_050_000 pixels.
+- **resolution_type=pixel:** The final image size will be determined by the smaller edge being this value.
+
+> **NOTE**: Whether images are upscaled, downscaled, or cropped, rely on the values of `minimum_image_size`, `maximum_target_size`, `target_downsample_size`, `crop`, and `crop_aspect`.
 
 ### `minimum_image_size`
 
-- **Area Comparison:** Specified in megapixels. Considers the entire pixel area.
-- **Pixel Comparison:** Both image edges must exceed this value, specified in pixels.
+- Any images whose size ends up falling underneath this value will be **excluded** from training.
+- When `resolution` is measured in megapixels (`resolution_type=area`), this should be in megapixels too (eg. `1.05` megapixels to exclude images under 1024x1024 **area**)
+- When `resolution` is measured in pixels, you should use the same unit here (eg. `1024` to exclude images under 1024px **shorter edge length**)
+- **Recommendation**: Keep `minimum_image_size` equal to `resolution` unless you want to risk training on poorly-upsized images.
+
+### `minimum_aspect_ratio`
+
+- **Description:** The minimum aspect ratio of the image. If the image's aspect ratio is less than this value, it will be excluded from training.
+- **Note**: If the number of images qualifying for exclusion is excessive, this might waste time at startup as the trainer will try to scan them and bucket if they are missing from the bucket lists.
+
+> **Note**: Once the aspect and metadata lists are built for your dataset, using `skip_file_discovery="vae aspect metadata"` will prevent the trainer from scanning the dataset on startup, saving a lot of time.
+
+### `maximum_aspect_ratio`
+
+- **Description:** The maximum aspect ratio of the image. If the image's aspect ratio is greater than this value, it will be excluded from training.
+- **Note**: If the number of images qualifying for exclusion is excessive, this might waste time at startup as the trainer will try to scan them and bucket if they are missing from the bucket lists.
+
+> **Note**: Once the aspect and metadata lists are built for your dataset, using `skip_file_discovery="vae aspect metadata"` will prevent the trainer from scanning the dataset on startup, saving a lot of time.
+
+### `conditioning`
+
+- **Values:** Array of conditioning configuration objects
+- **Description:** Automatically generates conditioning datasets from your source images. Each conditioning type creates a separate dataset that can be used for ControlNet training or other conditioning tasks.
+- **Note:** When specified, SimpleTuner will automatically create conditioning datasets with IDs like `{source_id}_conditioning_{type}`
+
+Each conditioning object can contain:
+- `type`: The type of conditioning to generate (required)
+- `params`: Type-specific parameters (optional)
+- `captions`: Caption strategy for the generated dataset (optional)
+  - Can be `false` (no captions)
+  - A single string (used as instance prompt for all images)
+  - An array of strings (randomly selected for each image)
+  - If omitted, captions from the source dataset are used
+
+#### Available Conditioning Types
+
+##### `superresolution`
+Generates low-quality versions of images for super-resolution training:
+```json
+{
+  "type": "superresolution",
+  "blur_radius": 2.5,
+  "blur_type": "gaussian",
+  "add_noise": true,
+  "noise_level": 0.03,
+  "jpeg_quality": 85,
+  "downscale_factor": 2
+}
+```
+
+##### `jpeg_artifacts`
+Creates JPEG compression artifacts for artifact removal training:
+```json
+{
+  "type": "jpeg_artifacts",
+  "quality_mode": "range",
+  "quality_range": [10, 30],
+  "compression_rounds": 1,
+  "enhance_blocks": false
+}
+```
+
+##### `depth` / `depth_midas`
+Generates depth maps using DPT models:
+```json
+{
+  "type": "depth_midas",
+  "model_type": "DPT"
+}
+```
+**Note:** Depth generation requires GPU and runs in the main process, which may be slower than CPU-based generators.
+
+##### `random_masks` / `inpainting`
+Creates random masks for inpainting training:
+```json
+{
+  "type": "random_masks",
+  "mask_types": ["rectangle", "circle", "brush", "irregular"],
+  "min_coverage": 0.1,
+  "max_coverage": 0.5,
+  "output_mode": "mask"
+}
+```
+
+##### `canny` / `edges`
+Generates Canny edge detection maps:
+```json
+{
+  "type": "canny",
+  "low_threshold": 100,
+  "high_threshold": 200
+}
+```
+
+See [the ControlNet guide](/documentation/CONTROLNET.md) for more details on how to use these conditioning datasets.
+
+#### Examples
+
+##### Video dataset
+
+A video dataset should be a folder of (eg. mp4) video files and the usual methods of storing captions.
+
+```json
+[
+  {
+    "id": "disney-black-and-white",
+    "type": "local",
+    "dataset_type": "video",
+    "crop": false,
+    "resolution": 480,
+    "minimum_image_size": 480,
+    "maximum_image_size": 480,
+    "target_downsample_size": 480,
+    "resolution_type": "pixel_area",
+    "cache_dir_vae": "cache/vae/ltxvideo/disney-black-and-white",
+    "instance_data_dir": "datasets/disney-black-and-white",
+    "disabled": false,
+    "caption_strategy": "textfile",
+    "metadata_backend": "discovery",
+    "repeats": 0,
+    "video": {
+        "num_frames": 125,
+        "min_frames": 125
+    }
+  },
+  {
+    "id": "text-embeds",
+    "type": "local",
+    "dataset_type": "text_embeds",
+    "default": true,
+    "cache_dir": "cache/text/ltxvideo",
+    "disabled": false,
+    "write_batch_size": 128
+  }
+]
+```
+
+- In the `video` subsection, we have the following keys we can set:
+  - `num_frames` (optional, int) is how many seconds of data we'll train on.
+    - At 25 fps, 125 frames is 5 seconds of video, standard output. This should be your target.
+  - `min_frames` (optional, int) determines the minimum length of a video that will be considered for training.
+    - This should be at least equal to `num_frames`. Not setting it ensures it'll be equal.
+  - `max_frames` (optional, int) determines the maximum length of a video that will be considered for training.
+  - `is_i2v` (optional, bool) determines whether i2v training will be done on a dataset.
+    - This is set to True by default for LTX. You can disable it, however.
+
+
+##### Configuration
+```json
+    "minimum_image_size": 1024,
+    "resolution": 1024,
+    "resolution_type": "pixel"
+```
+##### Outcome
+- Any images with a shorter edge less than **1024px** will be completely excluded from training.
+- Images like `768x1024` or `1280x768` would be excluded, but `1760x1024` and `1024x1024` would not.
+- No image will be upsampled, because `minimum_image_size` is equal to `resolution`
+
+##### Configuration
+```json
+    "minimum_image_size": 1024,
+    "resolution": 1024,
+    "resolution_type": "pixel_area" # different from the above configuration, which is 'pixel'
+```
+##### Outcome
+- The image's total area (width * height) being less than the minimum area (1024 * 1024) will result in it being excluded from training.
+- Images like `1280x960` would **not** be excluded because `(1280 * 960)` is greater than `(1024 * 1024)`
+- No image will be upsampled, because `minimum_image_size` is equal to `resolution`
+
+##### Configuration
+```json
+    "minimum_image_size": 0, # or completely unset, not present in the config
+    "resolution": 1024,
+    "resolution_type": "pixel",
+    "crop": false
+```
+
+##### Outcome
+- Images will be resized so their shorter edge is 1024px while maintaining their aspect ratio
+- No images will be excluded based on size
+- Small images will be upscaled using naive `PIL.resize` methods that do not look good
+  - Upscaling is recommended to avoid unless done by hand using an upscaler of your choice before beginning training
 
 ### `maximum_image_size` and `target_downsample_size`
 
-- `maximum_image_size` specifies the maximum image size that will be considered croppable. It will downsample images before cropping if they are larger than this.
+Images are not resized before cropping **unless** `maximum_image_size` and `target_downsample_size` are both set. In other words, a `4096x4096` image will be directly cropped to a `1024x1024` target, which may be undesirable.
+
+- `maximum_image_size` specifies the threshold at which the resizing will begin. It will downsample images before cropping if they are larger than this.
 - `target_downsample_size` specifies how large the image will be after resample and before it is cropped.
-- **Example**: A 20 megapixel image is too large to crop to 1 megapixel without losing context. Set `maximum_size_image=5.0` and `target_downsample_size=2.0` to resize any images larger than 5 megapixels down to 2 megapixels before cropping to 1 megapixel.
+
+#### Examples
+
+##### Configuration
+```json
+    "resolution_type": "pixel_area",
+    "resolution": 1024,
+    "maximum_image_size": 1536,
+    "target_downsample_size": 1280,
+    "crop": true,
+    "crop_aspect": "square"
+```
+
+##### Outcome
+- Any images with a pixel area greater than `(1536 * 1536)` will be resized so that its pixel area is roughly `(1280 * 1280)` while maintaining its original aspect ratio
+- Final image size will be random-cropped to a pixel area of `(1024 * 1024)`
+- Useful for training on eg. 20 megapixel datasets that need to be resized substantially before cropping to avoid massive loss of scene context in the image (like cropping a picture of a person to just a tile wall or a blurry section of the background)
+
+
+---
 
 ### `prepend_instance_prompt`
 
@@ -121,24 +339,37 @@ Both `textfile` and `parquet` support multi-captions:
 ### `repeats`
 
 - Specifies the number of times all samples in the dataset are seen during an epoch. Useful for giving more impact to smaller datasets or maximizing the usage of VAE cache objects.
+- If you have a dataset of 1000 images vs one with 100 images, you would likely want to give the lesser dataset a repeats of `9` **or greater** to bring it to 1000 total images sampled.
 
-> ℹ️ This value behaves differently to the same option in Kohya's scripts, where a value of 1 means no repeats. **For SimpleTuner, a value of 0 means no repeats**. Subtract one from your Kohya config value to obtain the equivalent for SimpleTuner.
+> ℹ️ This value behaves differently to the same option in Kohya's scripts, where a value of 1 means no repeats. **For SimpleTuner, a value of 0 means no repeats**. Subtract one from your Kohya config value to obtain the equivalent for SimpleTuner, hence a value of **9** resulting from the calculation `(dataset_length + repeats * dataset_length)` .
+
+### `is_regularisation_data`
+
+- Also may be spelt `is_regularization_data`
+- Enables parent-teacher training for LyCORIS adapters so that the prediction target prefers the base model's result for a given dataset.
+  - Standard LoRA are not currently supported.
 
 ### `vae_cache_clear_each_epoch`
 
 - When enabled, all VAE cache objects are deleted from the filesystem at the end of each dataset repeat cycle. This can be resource-intensive for large datasets, but combined with `crop_style=random` and/or `crop_aspect=random` you'll want this enabled to ensure you sample a full range of crops from each image.
-
-### `ignore_epochs`
-
-- When enabled, this dataset will not hold up the rest of the datasets from completing an epoch. This will inherently make the value for the current epoch inaccurate, as it reflects only the number of times any datasets _without_ this flag have completed all of their repeats. The state of the ignored dataset isn't reset upon the next epoch, it is simply ignored. It will eventually run out of samples as a dataset typically does. At that time it will be removed from consideration until the next natural epoch completes.
+- In fact, this option is **enabled by default** when using random bucketing or crops.
 
 ### `skip_file_discovery`
 
-- This allows specifying the commandline option `--skip_file_discovery` just for a particular dataset at a time. This is helpful if you have datasets you don't need the trainer to scan on every startup, eg. their latents/embeds are already cached fully. This allows quicker startup and resumption of training. This parameter accepts a comma or space separated list of values, eg. `vae metadata aspect text` to skip file discovery for one or more stages of the loader configuration.
+- You probably don't want to ever set this - it is useful only for very large datasets.
+- This parameter accepts a comma or space separated list of values, eg. `vae metadata aspect text` to skip file discovery for one or more stages of the loader configuration.
+- This is equivalent to the commandline option `--skip_file_discovery`
+- This is helpful if you have datasets you don't need the trainer to scan on every startup, eg. their latents/embeds are already cached fully. This allows quicker startup and resumption of training.
 
-### `preserve_data_cache_backend`
+### `preserve_data_backend_cache`
 
-- Like `skip_file_discovery`, this option can be set to prevent repeated lookups of file lists during startup. It takes a boolean value, and if set to be `true`, the generated cache file will not be removed at launch. This is helpful for very large and slow storage systems such as S3 or local SMR spinning hard drives that have extremely slow response times. Additionally, on S3, backend listing can add up in cost and should be avoided. **Unfortunately, this cannot be set if the data is actively being changed.** The trainer will not see any new data that is added to the pool, it will have to do another full scan.
+- You probably don't want to ever set this - it is useful only for very large AWS datasets.
+- Like `skip_file_discovery`, this option can be set to prevent unnecessary, lengthy and costly filesystem scans at startup.
+- It takes a boolean value, and if set to be `true`, the generated filesystem list cache file will not be removed at launch.
+- This is helpful for very large and slow storage systems such as S3 or local SMR spinning hard drives that have extremely slow response times.
+- Additionally, on S3, backend listing can add up in cost and should be avoided.
+
+> ⚠️ **Unfortunately, this cannot be set if the data is actively being changed.** The trainer will not see any new data that is added to the pool, it will have to do another full scan.
 
 ### `hash_filenames`
 
@@ -152,7 +383,7 @@ Both `textfile` and `parquet` support multi-captions:
 
 #### Example filter list
 
-A complete example list can be found [here](/caption_filter_list.example.txt). It contains common repetitive and negative strings that would be returned by BLIP (all common variety), LLaVA, and CogVLM.
+A complete example list can be found [here](/config/caption_filter_list.txt.example). It contains common repetitive and negative strings that would be returned by BLIP (all common variety), LLaVA, and CogVLM.
 
 This is a shortened example, which will be explained below:
 
@@ -184,7 +415,7 @@ In order, the lines behave as follows:
     "instance_data_dir": "/path/to/data/tree",
     "crop": false,
     "crop_style": "random|center|corner|face",
-    "crop_aspect": "square|preserve|random",
+    "crop_aspect": "square|preserve|closest|random",
     "crop_aspect_buckets": [0.33, 0.5, 0.75, 1.0, 1.25, 1.5, 1.75],
     "resolution": 1.0,
     "resolution_type": "area|pixel",
@@ -358,7 +589,7 @@ Here is an example dataloader configuration that makes use of the captions and d
   "vae_cache_clear_each_epoch": true,
   "repeats": 1,
   "crop": true,
-  "crop_aspect": "random",
+  "crop_aspect": "closest",
   "crop_style": "random",
   "crop_aspect_buckets": [1.0, 0.75, 1.23],
   "resolution_type": "area"
@@ -438,6 +669,30 @@ In this example configuration:
 ```
 
 **Note:** The `image_embeds` dataset does not have any options to set for data paths. Those are configured via `cache_dir_vae` on the image backend.
+
+### Hugging Face Datasets Support
+
+SimpleTuner now supports loading datasets directly from Hugging Face Hub without downloading the entire dataset locally. This experimental feature is ideal for:
+
+- Large-scale datasets hosted on Hugging Face
+- Datasets with built-in metadata and quality assessments
+- Quick experimentation without local storage requirements
+
+For thorough documentation on this feature, refer to [this document](/documentation/HUGGINGFACE_DATASETS.md).
+
+For a basic example of how to use a Hugging Face dataset, set `"type": "huggingface"` in your dataloader configuration:
+
+```json
+{
+  "id": "my-hf-dataset",
+  "type": "huggingface",
+  "dataset_name": "username/dataset-name",
+  "caption_strategy": "huggingface",
+  "metadata_backend": "huggingface",
+  "caption_column": "caption",
+  "image_column": "image"
+}
+```
 
 ## Custom aspect ratio-to-resolution mapping
 

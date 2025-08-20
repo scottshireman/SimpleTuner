@@ -1,64 +1,33 @@
-from diffusers.training_utils import EMAModel, _set_state_dict_into_text_encoder
+import types
+from contextlib import contextmanager
+from helpers.training.ema import EMAModel
 from helpers.training.wrappers import unwrap_model
+from helpers.training.multi_process import _get_rank as get_rank
+from diffusers.utils.state_dict_utils import StateDictType
 from diffusers.utils import (
     convert_state_dict_to_diffusers,
     convert_unet_state_dict_to_peft,
 )
 from peft import set_peft_model_state_dict
 from peft.utils import get_peft_model_state_dict
-
-from helpers.sdxl.pipeline import StableDiffusionXLPipeline
+from helpers.models.common import PipelineTypes
 from helpers.training.state_tracker import StateTracker
-from helpers.models.smoldit import SmolDiT2DModel, SmolDiTPipeline
 import os
 import logging
 import shutil
+import inspect
 import json
 from safetensors import safe_open
 from safetensors.torch import save_file
 from tqdm import tqdm
 
-
 logger = logging.getLogger("SaveHookManager")
-logger.setLevel(os.environ.get("SIMPLETUNER_LOG_LEVEL") or "INFO")
+from helpers.training.multi_process import should_log
 
-try:
-    from diffusers import (
-        UNet2DConditionModel,
-        StableDiffusion3Pipeline,
-        SD3Transformer2DModel,
-        StableDiffusionPipeline,
-        FluxPipeline,
-        PixArtSigmaPipeline,
-        ControlNetModel,
-        HunyuanDiTPipeline,
-    )
-except ImportError:
-    logger.error("This release requires the latest version of Diffusers.")
-
-try:
-    from diffusers.models import PixArtTransformer2DModel
-except Exception as e:
-    logger.error(
-        f"Can not load Pixart Sigma model class. This release requires the latest version of Diffusers: {e}"
-    )
-    raise e
-
-try:
-    from diffusers.models import FluxTransformer2DModel
-except Exception as e:
-    logger.error(
-        f"Can not load FluxTransformer2DModel model class. This release requires the latest version of Diffusers: {e}"
-    )
-    raise e
-
-try:
-    from diffusers.models import HunyuanDiT2DModel
-except Exception as e:
-    logger.error(
-        f"Can not load Hunyuan DiT model class. This release requires the latest version of Diffusers: {e}"
-    )
-    raise e
+if should_log():
+    logger.setLevel(os.environ.get("SIMPLETUNER_LOG_LEVEL", "INFO"))
+else:
+    logger.setLevel("ERROR")
 
 
 def merge_safetensors_files(directory):
@@ -105,107 +74,119 @@ class SaveHookManager:
     def __init__(
         self,
         args,
-        unet,
-        transformer,
+        model,
         ema_model,
-        text_encoder_1,
-        text_encoder_2,
         accelerator,
         use_deepspeed_optimizer,
     ):
 
         self.args = args
-        self.unet = unet
-        self.transformer = transformer
-        if self.unet is not None and self.transformer is not None:
-            raise ValueError("Both `unet` and `transformer` cannot be set.")
-        self.text_encoder_1 = text_encoder_1
-        self.text_encoder_2 = text_encoder_2
+        self.model = model
+        if self.model.get_trained_component() is None:
+            raise ValueError("No model was loaded?")
         self.ema_model = ema_model
         self.accelerator = accelerator
         self.use_deepspeed_optimizer = use_deepspeed_optimizer
 
-        self.denoiser_class = None
-        self.denoiser_subdir = None
-        self.pipeline_class = None
-        if self.unet is not None:
-            self.denoiser_class = UNet2DConditionModel
-            self.denoiser_subdir = "unet"
-            self.pipeline_class = StableDiffusionXLPipeline
-            if StateTracker.get_model_type() == "legacy":
-                self.pipeline_class = StableDiffusionPipeline
-        elif self.transformer is not None:
-            if args.sd3:
-                self.denoiser_class = SD3Transformer2DModel
-                self.pipeline_class = StableDiffusion3Pipeline
-            elif args.flux:
-                self.denoiser_class = FluxTransformer2DModel
-                self.pipeline_class = FluxPipeline
-            elif hasattr(args, "hunyuan_dit") and args.hunyuan_dit:
-                self.denoiser_class = HunyuanDiT2DModel
-                self.pipeline_class = HunyuanDiTPipeline
-            elif args.pixart_sigma:
-                self.denoiser_class = PixArtTransformer2DModel
-                self.pipeline_class = PixArtSigmaPipeline
-            elif args.smoldit:
-                self.denoiser_class = SmolDiT2DModel
-                self.pipeline_class = SmolDiTPipeline
-            self.denoiser_subdir = "transformer"
+        self.denoiser_class = self.model.MODEL_CLASS
+        self.denoiser_subdir = self.model.MODEL_SUBFOLDER
+        self.pipeline_class = self.model.PIPELINE_CLASSES[
+            (
+                PipelineTypes.IMG2IMG
+                if args.validation_using_datasets
+                else PipelineTypes.TEXT2IMG
+            )
+        ]
 
-        if args.controlnet:
-            self.denoiser_class = ControlNetModel
-            self.denoiser_subdir = "controlnet"
-        logger.info(f"Denoiser class set to: {self.denoiser_class.__name__}.")
-        logger.info(f"Pipeline class set to: {self.pipeline_class.__name__}.")
-
-        self.ema_model_cls = None
-        self.ema_model_subdir = None
-        if unet is not None:
-            self.ema_model_subdir = "unet_ema"
-            self.ema_model_cls = UNet2DConditionModel
-        if transformer is not None:
-            self.ema_model_subdir = "transformer_ema"
-            if self.args.sd3:
-                self.ema_model_cls = SD3Transformer2DModel
-            elif self.args.pixart_sigma:
-                self.ema_model_cls = PixArtTransformer2DModel
+        self.ema_model_cls = self.model.get_trained_component().__class__
+        self.ema_model_subdir = f"{self.model.MODEL_SUBFOLDER}_ema"
+        self.training_state_path = "training_state.json"
+        if self.accelerator is not None:
+            rank = get_rank()
+            if rank > 0:
+                self.training_state_path = f"training_state-rank{rank}.json"
 
     def _save_lora(self, models, weights, output_dir):
         # for SDXL/others, there are only two options here. Either are just the unet attn processor layers
         # or there are the unet and text encoder atten layers.
-        unet_lora_layers_to_save = None
-        transformer_lora_layers_to_save = None
+        model_lora_layers_to_save = None
+        text_encoder_0_lora_layers_to_save = None
         text_encoder_1_lora_layers_to_save = None
-        text_encoder_2_lora_layers_to_save = None
         # Diffusers does not train the third text encoder.
         # text_encoder_3_lora_layers_to_save = None
 
+        if self.args.use_ema:
+            # we'll temporarily overwrite teh LoRA parameters with the EMA parameters to save it.
+            logger.info("Saving EMA model to disk.")
+            trainable_parameters = [
+                p
+                for p in self.model.get_trained_component(
+                    unwrap_model=False
+                ).parameters()
+                if p.requires_grad
+            ]
+            self.ema_model.store(trainable_parameters)
+            self.ema_model.copy_to(trainable_parameters)
+            lora_save_parameters = {
+                f"{self.model.MODEL_SUBFOLDER}_lora_layers": convert_state_dict_to_diffusers(
+                    get_peft_model_state_dict(
+                        unwrap_model(
+                            self.accelerator, self.model.get_trained_component()
+                        )
+                    ),
+                    original_type=StateDictType.PEFT,
+                ),
+            }
+            self.model.save_lora_weights(
+                os.path.join(output_dir, "ema"), **lora_save_parameters
+            )
+            self.ema_model.restore(trainable_parameters)
+
+        lora_save_parameters = {}
+        # TODO: Make this less shitty.
         for model in models:
-            if isinstance(model, type(unwrap_model(self.accelerator, self.unet))):
-                unet_lora_layers_to_save = convert_state_dict_to_diffusers(
-                    get_peft_model_state_dict(model)
+            if self.args.controlnet and isinstance(
+                model,
+                type(
+                    unwrap_model(self.accelerator, self.model.get_trained_component())
+                ),
+            ):
+                # controlnet_lora_layers
+                controlnet_layers = get_peft_model_state_dict(model)
+                lora_save_parameters[f"controlnet_lora_layers"] = controlnet_layers
+            elif isinstance(
+                model,
+                type(
+                    unwrap_model(self.accelerator, self.model.get_trained_component())
+                ),
+            ):
+                # unet_lora_layers or transformer_lora_layers
+                lora_save_parameters[f"{self.model.MODEL_SUBFOLDER}_lora_layers"] = (
+                    convert_state_dict_to_diffusers(
+                        get_peft_model_state_dict(model),
+                        original_type=StateDictType.PEFT,
+                    )
                 )
             elif isinstance(
-                model, type(unwrap_model(self.accelerator, self.text_encoder_1))
+                model,
+                type(unwrap_model(self.accelerator, self.model.get_text_encoder(0))),
             ):
-                text_encoder_1_lora_layers_to_save = convert_state_dict_to_diffusers(
-                    get_peft_model_state_dict(model)
+                lora_save_parameters["text_encoder_lora_layers"] = (
+                    convert_state_dict_to_diffusers(
+                        get_peft_model_state_dict(model),
+                        original_type=StateDictType.PEFT,
+                    )
                 )
             elif isinstance(
-                model, type(unwrap_model(self.accelerator, self.text_encoder_2))
+                model,
+                type(unwrap_model(self.accelerator, self.model.get_text_encoder(1))),
             ):
-                text_encoder_2_lora_layers_to_save = convert_state_dict_to_diffusers(
-                    get_peft_model_state_dict(model)
+                lora_save_parameters["text_encoder_1_lora_layers"] = (
+                    convert_state_dict_to_diffusers(
+                        get_peft_model_state_dict(model),
+                        original_type=StateDictType.PEFT,
+                    )
                 )
-
-            elif not isinstance(
-                model, type(unwrap_model(self.accelerator, HunyuanDiT2DModel))
-            ):
-                if isinstance(
-                    model, type(unwrap_model(self.accelerator, self.transformer))
-                ):
-                    transformer_lora_layers_to_save = get_peft_model_state_dict(model)
-
             elif not self.use_deepspeed_optimizer:
                 raise ValueError(f"unexpected save model: {model.__class__}")
 
@@ -213,40 +194,17 @@ class SaveHookManager:
             if weights:
                 weights.pop()
 
-        if self.args.flux:
-            self.pipeline_class.save_lora_weights(
-                output_dir,
-                transformer_lora_layers=transformer_lora_layers_to_save,
-                text_encoder_lora_layers=text_encoder_1_lora_layers_to_save,
-            )
-        elif self.args.sd3:
-            self.pipeline_class.save_lora_weights(
-                output_dir,
-                transformer_lora_layers=transformer_lora_layers_to_save,
-                text_encoder_lora_layers=text_encoder_1_lora_layers_to_save,
-                text_encoder_2_lora_layers=text_encoder_2_lora_layers_to_save,
-            )
-        elif self.args.legacy:
-            self.pipeline_class.save_lora_weights(
-                output_dir,
-                unet_lora_layers=unet_lora_layers_to_save,
-                text_encoder_lora_layers=text_encoder_1_lora_layers_to_save,
-                transformer_lora_layers=transformer_lora_layers_to_save,
-            )
-        else:
-            self.pipeline_class.save_lora_weights(
-                output_dir,
-                unet_lora_layers=unet_lora_layers_to_save,
-                text_encoder_lora_layers=text_encoder_1_lora_layers_to_save,
-                text_encoder_2_lora_layers=text_encoder_2_lora_layers_to_save,
-            )
+        self.model.save_lora_weights(output_dir, **lora_save_parameters)
 
     def _save_lycoris(self, models, weights, output_dir):
         """
         save wrappers for lycoris. For now, text encoders are not trainable
         via lycoris.
         """
-        from helpers.publishing.huggingface import LORA_SAFETENSORS_FILENAME
+        from helpers.publishing.huggingface import (
+            LORA_SAFETENSORS_FILENAME,
+            EMA_SAFETENSORS_FILENAME,
+        )
 
         for _ in models:
             if weights:
@@ -261,6 +219,28 @@ class SaveHookManager:
             list(self.accelerator._lycoris_wrapped_network.parameters())[0].dtype,
             {"lycoris_config": json.dumps(lycoris_config)},  # metadata
         )
+        if self.args.use_ema:
+            # we'll store lycoris weights.
+            self.ema_model.store(self.accelerator._lycoris_wrapped_network.parameters())
+            # we'll write EMA to the lycoris adapter temporarily.
+            self.ema_model.copy_to(
+                self.accelerator._lycoris_wrapped_network.parameters()
+            )
+            # now we can write the lycoris weights using the EMA_SAFETENSORS_FILENAME instead.
+            os.makedirs(os.path.join(output_dir, "ema"), exist_ok=True)
+            self.accelerator._lycoris_wrapped_network.save_weights(
+                os.path.join(output_dir, "ema", EMA_SAFETENSORS_FILENAME),
+                list(self.accelerator._lycoris_wrapped_network.parameters())[0].dtype,
+                {"lycoris_config": json.dumps(lycoris_config)},  # metadata
+            )
+            self.ema_model.restore(
+                self.accelerator._lycoris_wrapped_network.parameters()
+            )
+
+        # copy the config into the repo
+        shutil.copy2(
+            self.args.lycoris_config, os.path.join(output_dir, "lycoris_config.json")
+        )
 
         logger.info("LyCORIS weights have been saved to disk")
 
@@ -269,19 +249,25 @@ class SaveHookManager:
         temporary_dir = output_dir.replace("checkpoint", "temporary")
         os.makedirs(temporary_dir, exist_ok=True)
 
-        if self.args.use_ema:
-            tqdm.write("Saving EMA model")
+        if self.args.use_ema and self.accelerator.is_main_process:
+            # even with deepspeed, EMA should only save on the main process.
+            ema_model_path = os.path.join(
+                temporary_dir, self.ema_model_subdir, "ema_model.pt"
+            )
+            logger.info(f"Saving EMA model to {ema_model_path}")
+            try:
+                self.ema_model.save_state_dict(ema_model_path)
+            except Exception as e:
+                logger.error(f"Error saving EMA model: {e}")
+            logger.info(f"Saving EMA safetensors variant.")
             self.ema_model.save_pretrained(
                 os.path.join(temporary_dir, self.ema_model_subdir),
                 max_shard_size="10GB",
             )
-
-        if self.unet is not None:
-            sub_dir = "unet"
-        if self.transformer is not None:
-            sub_dir = "transformer"
+        sub_dir = self.model.MODEL_SUBFOLDER
         if self.args.controlnet:
             sub_dir = "controlnet"
+
         for model in models:
             model.save_pretrained(
                 os.path.join(temporary_dir, sub_dir), max_shard_size="10GB"
@@ -300,14 +286,26 @@ class SaveHookManager:
                 shutil.copy2(s, d)
 
         # Remove the temporary directory
-        shutil.rmtree(temporary_dir)
+        shutil.rmtree(temporary_dir, ignore_errors=True)
 
     def save_model_hook(self, models, weights, output_dir):
         # Write "training_state.json" to the output directory containing the training state
         StateTracker.save_training_state(
-            os.path.join(output_dir, "training_state.json")
+            os.path.join(output_dir, self.training_state_path)
         )
-        if "lora" in self.args.model_type and self.args.lora_type == "Standard":
+        if not self.accelerator.is_main_process:
+            return
+        if self.args.use_ema:
+            # we'll save this EMA checkpoint for restoring the state easier.
+            ema_model_path = os.path.join(
+                output_dir, self.ema_model_subdir, "ema_model.pt"
+            )
+            logger.info(f"Saving EMA model to {ema_model_path}")
+            try:
+                self.ema_model.save_state_dict(ema_model_path)
+            except Exception as e:
+                logger.error(f"Error saving EMA model: {e}")
+        if "lora" in self.args.model_type and self.args.lora_type == "standard":
             self._save_lora(models=models, weights=weights, output_dir=output_dir)
             return
         elif "lora" in self.args.model_type and self.args.lora_type == "lycoris":
@@ -318,74 +316,7 @@ class SaveHookManager:
 
     def _load_lora(self, models, input_dir):
         logger.info(f"Loading LoRA weights from Path: {input_dir}")
-        unet_ = None
-        transformer_ = None
-        denoiser = None
-        text_encoder_one_ = None
-        text_encoder_two_ = None
-
-        while len(models) > 0:
-            model = models.pop()
-
-            if isinstance(model, type(unwrap_model(self.accelerator, self.unet))):
-                unet_ = model
-                denoiser = unet_
-            elif isinstance(
-                model, type(unwrap_model(self.accelerator, self.transformer))
-            ):
-                transformer_ = model
-                denoiser = transformer_
-            elif isinstance(
-                model, type(unwrap_model(self.accelerator, self.text_encoder_1))
-            ):
-                text_encoder_one_ = model
-            elif isinstance(
-                model, type(unwrap_model(self.accelerator, self.text_encoder_2))
-            ):
-                text_encoder_two_ = model
-            else:
-                raise ValueError(f"unexpected save model: {model.__class__}")
-
-        if self.args.sd3 or self.args.flux:
-            key_to_replace = "transformer"
-            lora_state_dict = self.pipeline_class.lora_state_dict(input_dir)
-        else:
-            key_to_replace = "unet"
-            lora_state_dict, _ = self.pipeline_class.lora_state_dict(input_dir)
-
-        denoiser_state_dict = {
-            f'{k.replace(f"{key_to_replace}.", "")}': v
-            for k, v in lora_state_dict.items()
-            if k.startswith(f"{key_to_replace}.")
-        }
-        denoiser_state_dict = convert_unet_state_dict_to_peft(denoiser_state_dict)
-        incompatible_keys = set_peft_model_state_dict(
-            denoiser, denoiser_state_dict, adapter_name="default"
-        )
-
-        if incompatible_keys is not None:
-            # check only for unexpected keys
-            unexpected_keys = getattr(incompatible_keys, "unexpected_keys", None)
-            if unexpected_keys:
-                logger.warning(
-                    f"Loading adapter weights from state_dict led to unexpected keys not found in the model: "
-                    f" {unexpected_keys}. "
-                )
-
-        if self.args.train_text_encoder:
-            # Do we need to call `scale_lora_layers()` here?
-            _set_state_dict_into_text_encoder(
-                lora_state_dict,
-                prefix="text_encoder.",
-                text_encoder=text_encoder_one_,
-            )
-
-            _set_state_dict_into_text_encoder(
-                lora_state_dict,
-                prefix="text_encoder_2.",
-                text_encoder=text_encoder_two_,
-            )
-
+        self.model.load_lora_weights(models, input_dir)
         logger.info("Completed loading LoRA weights.")
 
     def _load_lycoris(self, models, input_dir):
@@ -400,39 +331,37 @@ class SaveHookManager:
         if len(state.keys()) > 0:
             logging.error(f"LyCORIS failed to load: {state}")
             raise RuntimeError("Loading of LyCORIS model failed")
-        self.accelerator._lycoris_wrapped_network.to(self.accelerator.device)
+        weight_dtype = StateTracker.get_weight_dtype()
+        if self.model.get_trained_component() is not None:
+            self.accelerator._lycoris_wrapped_network.to(
+                device=self.accelerator.device, dtype=weight_dtype
+            )
+        else:
+            raise ValueError("No model found to load LyCORIS weights into.")
 
         logger.info("LyCORIS weights have been loaded from disk")
+        # disable LyCORIS spam logging
+        lycoris_logger = logging.getLogger("LyCORIS")
+        lycoris_logger.setLevel(logging.ERROR)
 
     def _load_full_model(self, models, input_dir):
-        if self.args.use_ema:
-            load_model = EMAModel.from_pretrained(
-                os.path.join(input_dir, self.ema_model_subdir), self.ema_model_cls
-            )
-            self.ema_model.load_state_dict(load_model.state_dict())
-            self.ema_model.to(self.accelerator.device)
-            del load_model
         if self.args.model_type == "full":
             return_exception = False
             for i in range(len(models)):
                 try:
                     # pop models so that they are not loaded again
                     model = models.pop()
-
-                    # load diffusers style into model
-                    if self.args.controlnet or self.args.unet:
-                        merge_safetensors_files(
-                            os.path.join(input_dir, self.denoiser_subdir)
-                        )
-
                     load_model = self.denoiser_class.from_pretrained(
                         input_dir, subfolder=self.denoiser_subdir
                     )
-                    if self.args.sd3 and not self.args.train_text_encoder:
+                    if (
+                        self.args.model_family == "sd3"
+                        and not self.args.train_text_encoder
+                    ):
                         logger.info(
                             "Unloading text encoders for full SD3 training without --train_text_encoder"
                         )
-                        (self.text_encoder_1, self.text_encoder_2) = (None, None)
+                        (self.text_encoder_0, self.text_encoder_1) = (None, None)
 
                     model.register_to_config(**load_model.config)
                     model.load_state_dict(load_model.state_dict())
@@ -447,15 +376,31 @@ class SaveHookManager:
 
     def load_model_hook(self, models, input_dir):
         # Check the checkpoint dir for a "training_state.json" file to load
-        training_state_path = os.path.join(input_dir, "training_state.json")
+        training_state_path = os.path.join(input_dir, self.training_state_path)
+        if (
+            not os.path.exists(training_state_path)
+            and self.training_state_path != "training_state.json"
+        ):
+            logger.warning(
+                f"Could not find {training_state_path} in checkpoint dir {input_dir}. Trying the default path."
+            )
+            training_state_path = os.path.join(input_dir, "training_state.json")
         if os.path.exists(training_state_path):
             StateTracker.load_training_state(training_state_path)
         else:
             logger.warning(
-                f"Could not find training_state.json in checkpoint dir {input_dir}"
+                f"Could not find {training_state_path} in checkpoint dir {input_dir}"
             )
-
-        if "lora" in self.args.model_type and self.args.lora_type == "Standard":
+        if self.args.use_ema and self.accelerator.is_main_process:
+            try:
+                self.model.fuse_qkv_projections()  # if we don't fuse first, we might never load.
+                self.ema_model.load_state_dict(
+                    os.path.join(input_dir, self.ema_model_subdir, "ema_model.pt")
+                )
+                # self.ema_model.to(self.accelerator.device)
+            except Exception as e:
+                logger.error(f"Could not load EMA model: {e}")
+        if "lora" in self.args.model_type and self.args.lora_type == "standard":
             self._load_lora(models=models, input_dir=input_dir)
         elif "lora" in self.args.model_type and self.args.lora_type == "lycoris":
             self._load_lycoris(models=models, input_dir=input_dir)

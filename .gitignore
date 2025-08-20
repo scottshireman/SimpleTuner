@@ -60,3 +60,12 @@ vendor/
 inference/
 webhooks.json
 untracked/
+config/*/
+config/*.toml
+static
+templates
+api_state.json
+images/
+datasets/
+.test_runner_state
+.test_runner_state.json

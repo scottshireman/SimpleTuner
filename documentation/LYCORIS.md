@@ -2,16 +2,21 @@
 
 ## Background
 
-[LyCORIS](https://github.com/KohakuBlueleaf/LyCORIS) is a wrapper for models that allows various methods of low-rank (LoRA) training, which allows you to finetune models while using less VRAM and produces smaller distributable weights.
+[LyCORIS](https://github.com/KohakuBlueleaf/LyCORIS) is an extensive suite of parameter-efficient fine-tuning (PEFT) methods that allow you to finetune models while using less VRAM and produces smaller distributable weights.
 
 ## Using LyCORIS
 
-To use LyCORIS, set `--lora_type=lycoris` and then set `--lycoris_config=config/lycoris_config.json`, where `config/lycoris_config.json` is the location of your LyCORIS configuration file:
+To use LyCORIS, set `--lora_type=lycoris` and then set `--lycoris_config=config/lycoris_config.json`, where `config/lycoris_config.json` is the location of your LyCORIS configuration file.
 
-```bash
-MODEL_TYPE=lora
-# We use trainer_extra_args for now, as Lycoris support is so new.
-TRAINER_EXTRA_ARGS+=" --lora_type=lycoris --lycoris_config=config/lycoris_config.json"
+The following will go into your `config.json`:
+```json
+{
+    "model_type": "lora",
+    "lora_type": "lycoris",
+    "lycoris_config": "config/lycoris_config.json",
+    "validation_lycoris_strength": 1.0,
+    ...the rest of your settings...
+}
 ```
 
 
@@ -19,11 +24,25 @@ The LyCORIS configuration file is in the format:
 
 ```json
 {
-  "algo": "lora",
-  "multiplier": 1.0,
-  "linear_dim": 12345,
-  "linear_alpha": 1,
-  "apply_preset": {}
+    "algo": "lokr",
+    "multiplier": 1.0,
+    "linear_dim": 10000,
+    "linear_alpha": 1,
+    "factor": 10,
+    "apply_preset": {
+        "target_module": [
+            "Attention",
+            "FeedForward"
+        ],
+        "module_algo_map": {
+            "Attention": {
+                "factor": 10
+            },
+            "FeedForward": {
+                "factor": 4
+            }
+        }
+    }
 }
 ```
 
@@ -34,11 +53,19 @@ Optional fields:
 - any keyword arguments specific to the selected algorithm, at the end.
 
 Mandatory fields:
-- multiplier
+- multiplier, which should be set to 1.0 only unless you know what to expect
 - linear_dim
 - linear_alpha
 
 For more information on LyCORIS, please refer to the [documentation in the library](https://github.com/KohakuBlueleaf/LyCORIS/tree/main/docs).
+
+## Potential problems
+
+When using Lycoris on SDXL, it's noted that training the FeedForward modules may break the model and send loss into `NaN` (Not-a-Number) territory.
+
+This seems to be potentially exacerbated when using SageAttention (with `--sageattention_usage=training`), making it all but guaranteed that the model will immediately fail.
+
+The solution is to remove the `FeedForward` modules from the lycoris config and train only the `Attention` blocks.
 
 ## LyCORIS Inference Example
 
@@ -67,10 +94,10 @@ vae = AutoencoderKL.from_pretrained(bfl_repo, subfolder="vae", torch_dtype=dtype
 transformer = FluxTransformer2DModel.from_pretrained(bfl_repo, subfolder="transformer")
 
 lycoris_safetensors_path = 'pytorch_lora_weights.safetensors'
-wrapper, _ = create_lycoris_from_weights(1.0, lycoris_safetensors_path, transformer)
-wrapper.apply_to()
+lycoris_strength = 1.0
+wrapper, _ = create_lycoris_from_weights(lycoris_strength, lycoris_safetensors_path, transformer)
+wrapper.merge_to() # using apply_to() will be slower.
 
-wrapper.to(device, dtype=dtype)
 transformer.to(device, dtype=dtype)
 
 pipe = FluxPipeline(
@@ -95,4 +122,7 @@ with torch.inference_mode():
         guidance_scale=3.5,
     ).images[0]
 image.save('image.png')
+
+# optionally, save a merged pipeline containing the LyCORIS baked-in:
+pipe.save_pretrained('/path/to/output/pipeline')
 ```

@@ -11,6 +11,11 @@ This Docker configuration provides a comprehensive environment for running the S
 
 ## Getting Started
 
+### Windows OS support via WSL (Experimental)
+
+The following guide was tested in a WSL2 Distro that has Dockerengine installed.
+
+
 ### 1. Building the Container
 
 Clone the repository and navigate to the directory containing the Dockerfile. Build the Docker image using:
@@ -34,7 +39,7 @@ This command sets up the container with GPU access and maps the SSH port for ext
 To facilitate integration with external tools, the container supports environment variables for Huggingface and WandB tokens. Pass these at runtime as follows:
 
 ```bash
-docker run --gpus all -e HUGGING_FACE_HUB_TOKEN='your_token' -e WANDB_TOKEN='your_token' -it -p 22:22 simpletuner
+docker run --gpus all -e HF_TOKEN='your_token' -e WANDB_API_KEY='your_token' -it -p 22:22 simpletuner
 ```
 
 ### 4. Data Volumes
@@ -68,6 +73,44 @@ If you want to add custom startup scripts or modify configurations, extend the e
 
 If any capabilities cannot be achieved through this setup, please open a new issue.
 
+### Docker Compose
+
+For users who prefer `docker-compose.yaml`, this template is provided for you to extend and customise for your needs.
+
+Once the stack is deployed you can connect to the container and start operating in it as mentioned in the steps above.
+
+```bash
+docker compose up -d
+
+docker exec -it simpletuner /bin/bash
+```
+
+```docker-compose.yaml
+services:
+  simpletuner:
+    container_name: simpletuner
+    build:
+      context: [Path to the repository]/SimpleTuner
+      dockerfile: Dockerfile
+    ports:
+      - "[port to connect to the container]:22"
+    volumes:
+      - "[path to your datasets]:/datasets"
+      - "[path to your configs]:/workspace/SimpleTuner/config"
+    environment:
+      HF_TOKEN: [your hugging face token]
+      WANDB_API_KEY: [your wanddb token]
+    command: ["tail", "-f", "/dev/null"]
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+```
+
+> ⚠️ Please be cautious of handling your WandB and Hugging Face tokens! It's advised not to commit them even to a private version-control repository to ensure they are not leaked. For production use-cases, key management storage is recommended, but out of scope for this guide.
 ---
 
 ## Troubleshooting

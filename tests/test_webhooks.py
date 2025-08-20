@@ -9,10 +9,17 @@ from PIL import Image
 class TestWebhookHandler(unittest.TestCase):
     def setUp(self):
         # Create a mock for the WebhookConfig
-        mock_config_instance = MagicMock(spec=WebhookConfig)
-        mock_config_instance.webhook_url = "http://example.com/webhook"
-        mock_config_instance.log_level = "info"
-        mock_config_instance.message_prefix = "TestPrefix"
+        self.mock_config_instance = MagicMock(spec=WebhookConfig)
+        self.mock_config_instance.webhook_url = "http://example.com/webhook"
+        self.mock_config_instance.webhook_type = "discord"
+        self.mock_config_instance.log_level = "info"
+        self.mock_config_instance.message_prefix = "TestPrefix"
+        self.mock_config_instance.values = {
+            "webhook_url": "http://example.com/webhook",
+            "webhook_type": "discord",
+            "log_level": "info",
+            "message_prefix": "TestPrefix",
+        }
 
         # Mock the accelerator object
         self.mock_accelerator = MagicMock()
@@ -23,14 +30,21 @@ class TestWebhookHandler(unittest.TestCase):
             config_path="dummy_path",
             accelerator=self.mock_accelerator,
             project_name="TestProject",
-            mock_webhook_config=mock_config_instance,
+            mock_webhook_config=self.mock_config_instance,
+            args=MagicMock(framerate=99),
         )
 
     @patch("requests.post")
     def test_send_message_info_level(self, mock_post):
         # Test sending a simple info level message
-        self.handler.send("Test message", message_level="info")
+        message = "Test message"
+        self.handler.send(message, message_level="info")
         mock_post.assert_called_once()
+        # Capture the call arguments
+        args, kwargs = mock_post.call_args
+        # Assuming the message is sent in 'data' parameter
+        self.assertIn("data", kwargs)
+        self.assertIn(message, kwargs["data"].get("content"))
 
     @patch("requests.post")
     def test_debug_message_wont_send(self, mock_post):
@@ -49,12 +63,16 @@ class TestWebhookHandler(unittest.TestCase):
     def test_send_with_images(self, mock_post):
         # Test sending messages with images
         image = Image.new("RGB", (60, 30), color="red")
-        self.handler.send(
-            "Test message with image", images=[image], message_level="info"
-        )
+        message = "Test message with image"
+        self.handler.send(message, images=[image], message_level="info")
         args, kwargs = mock_post.call_args
         self.assertIn("files", kwargs)
         self.assertEqual(len(kwargs["files"]), 1)
+        # Check that the message is in the 'data' parameter
+        content = kwargs.get("data", {}).get("content", "")
+        self.assertIn(self.mock_config_instance.values.get("message_prefix"), content)
+        self.assertIn("data", kwargs, f"Check data for contents: {kwargs}")
+        self.assertIn(message, content)
 
     @patch("requests.post")
     def test_response_storage(self, mock_post):
@@ -65,6 +83,11 @@ class TestWebhookHandler(unittest.TestCase):
 
         self.handler.send("Test message", message_level="info", store_response=True)
         self.assertEqual(self.handler.stored_response, mock_response.headers)
+        # Also check that the message is sent
+        args, kwargs = mock_post.call_args
+        content = kwargs.get("data", {}).get("content", "")
+        self.assertIn(self.mock_config_instance.values.get("message_prefix"), content)
+        self.assertIn("Test message", content)
 
 
 if __name__ == "__main__":

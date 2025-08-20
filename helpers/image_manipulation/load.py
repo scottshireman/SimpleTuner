@@ -1,12 +1,16 @@
 import logging
+import tempfile
+import os
+import numpy as np
 
 from io import BytesIO
 from typing import Union, IO, Any
 
-import numpy as np
-
+try:
+    import pillow_jxl
+except ModuleNotFoundError:
+    pass
 from PIL import Image, PngImagePlugin
-
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.WARNING)
@@ -70,6 +74,41 @@ def decode_image_with_pil(img_data: bytes) -> Image.Image:
     return img_pil
 
 
+def remove_iccp_chunk(img_bytes: bytes) -> bytes:
+    """
+    Remove the iCCP chunk from a PNG image if present.
+    Returns the modified bytes, or the original if not PNG or no iCCP chunk found.
+    """
+    PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
+    if not img_bytes.startswith(PNG_SIGNATURE):
+        return img_bytes
+
+    out = bytearray()
+    out += PNG_SIGNATURE
+    i = len(PNG_SIGNATURE)
+    while i < len(img_bytes):
+        # Need at least 8 bytes for length and type
+        if i + 8 > len(img_bytes):
+            break
+        length = int.from_bytes(img_bytes[i : i + 4], "big")
+        # Validate length: must be non-negative, not too large, and fit in buffer
+        if length < 0 or length > 2**31 - 1 or i + 8 + length + 4 > len(img_bytes):
+            # Malformed chunk length; abort processing to avoid memory issues
+            break
+        # Need enough bytes for chunk data and CRC (4 bytes)
+        if i + 8 + length + 4 > len(img_bytes):
+            break
+        chunk_type = img_bytes[i + 4 : i + 8]
+        # crc = img_bytes[i + 8 + length : i + 12 + length]
+        if chunk_type == b"iCCP":
+            # skip this chunk
+            i += 8 + length + 4
+            continue
+        out += img_bytes[i : i + 8 + length + 4]
+        i += 8 + length + 4
+    return bytes(out)
+
+
 def load_image(img_data: Union[bytes, IO[Any], str]) -> Image.Image:
     """
     Load an image using CV2. If that fails, fall back to PIL.
@@ -82,6 +121,9 @@ def load_image(img_data: Union[bytes, IO[Any], str]) -> Image.Image:
     elif hasattr(img_data, "read"):
         # Check if it's file-like object.
         img_data = img_data.read()
+
+    # remove iCCP chunk if found
+    img_data = remove_iccp_chunk(img_data)
 
     # Preload the image bytes with channels unchanged and ensure determine
     # if the image has an alpha channel. If it does we should add a white
@@ -103,3 +145,72 @@ def load_image(img_data: Union[bytes, IO[Any], str]) -> Image.Image:
     if img is None:
         img = decode_image_with_pil(img_data)
     return img
+
+
+def load_video(vid_data: Union[bytes, IO[Any], str]) -> np.ndarray:
+    """
+    Load a video using OpenCV's VideoCapture.
+
+    Accepts a file path (str), a file-like object, or raw bytes.
+    Reads all frames from the video and returns them as a NumPy array.
+
+    Raises:
+        ValueError: If the video cannot be opened or no frames are read.
+        TypeError: If the input type is not supported.
+    """
+    tmp_path = None
+
+    # If it's a file path, use it directly.
+    if isinstance(vid_data, str):
+        video_path = vid_data
+    # If it's a file-like object.
+    elif hasattr(vid_data, "read"):
+        data = vid_data.read()
+        tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4")
+        try:
+            tmp.write(data)
+            video_path = tmp.name
+            tmp_path = video_path
+        finally:
+            tmp.close()
+    # If it's raw bytes.
+    elif isinstance(vid_data, bytes):
+        tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4")
+        try:
+            tmp.write(vid_data)
+            video_path = tmp.name
+            tmp_path = video_path
+        finally:
+            tmp.close()
+    else:
+        raise TypeError(
+            "Unsupported type for vid_data. Expected str, bytes, or file-like object."
+        )
+
+    # Open the video using VideoCapture.
+    cap = cv2.VideoCapture(video_path)
+    if not cap.isOpened():
+        if tmp_path:
+            os.remove(tmp_path)
+        raise ValueError("Failed to open video.")
+
+    frames = []
+    while True:
+        ret, frame = cap.read()
+        if not ret:
+            break
+        frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        frames.append(frame_rgb)
+
+    cap.release()
+
+    # Clean up temporary file if one was used.
+    if tmp_path:
+        os.remove(tmp_path)
+
+    if not frames:
+        raise ValueError("No frames were read from the video.")
+
+    # Stack frames into a numpy array: shape (num_frames, height, width, channels)
+    video_array = np.stack(frames, axis=0)
+    return video_array

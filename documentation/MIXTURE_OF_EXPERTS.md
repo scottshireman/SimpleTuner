@@ -30,6 +30,7 @@ export USE_BITFIT=false
 export USE_DORA=false
 # lora could be used here instead, but the concept hasn't been explored.
 export MODEL_TYPE="full"
+export MODEL_FAMILY="sdxl"
 export MODEL_NAME="segmind/SSD-1B"
 # The original Segmind model used a learning rate of 1e-5, which is
 # probably too high for whatever batch size most users can pull off.
@@ -103,6 +104,14 @@ If you'd like a demonstration dataset, [pseudo-camera-10k](https://huggingface.c
 ### Validation
 
 Stage two refiner training will automatically select images from each of your training sets, and use those as inputs for partial denoising at validation time.
+
+## CLIP score tracking
+
+If you wish to enable evaluations to score the model's performance, see [this document](/documentation/evaluation/CLIP_SCORES.md) for information on configuring and interpreting CLIP scores.
+
+# Stable evaluation loss
+
+If you wish to use stable MSE loss to score the model's performance, see [this document](/documentation/evaluation/EVAL_LOSS.md) for information on configuring and interpreting evaluation loss.
 
 ## Putting it all together at inference time
 

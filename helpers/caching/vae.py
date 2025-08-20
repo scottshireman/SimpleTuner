@@ -13,19 +13,27 @@ from helpers.image_manipulation.training_sample import TrainingSample, PreparedS
 from helpers.data_backend.base import BaseDataBackend
 from helpers.metadata.backends.base import MetadataBackend
 from helpers.training.state_tracker import StateTracker
-from helpers.training.multi_process import _get_rank as get_rank
-from helpers.training.multi_process import rank_info
+from helpers.training.multi_process import _get_rank as get_rank, rank_info, should_log
 from queue import Queue
 from concurrent.futures import as_completed
 from hashlib import sha256
 from helpers.training import image_file_extensions
+from helpers.webhooks.mixin import WebhookMixin
+from helpers.models.ltxvideo import normalize_ltx_latents
+from helpers.models.wan import compute_wan_posterior
 
 logger = logging.getLogger("VAECache")
-logger.setLevel(os.environ.get("SIMPLETUNER_LOG_LEVEL", "INFO"))
+if should_log():
+    logger.setLevel(os.environ.get("SIMPLETUNER_LOG_LEVEL", "INFO"))
+else:
+    logger.setLevel("ERROR")
 
 
 def prepare_sample(
-    image: Image.Image = None, data_backend_id: str = None, filepath: str = None
+    image: Image.Image = None,
+    data_backend_id: str = None,
+    filepath: str = None,
+    model=None,
 ):
     metadata = StateTracker.get_metadata_by_filepath(
         filepath, data_backend_id=data_backend_id
@@ -40,8 +48,47 @@ def prepare_sample(
         data_backend_id=data_backend_id,
         image_metadata=metadata,
         image_path=filepath,
+        model=model,
     )
-    prepared_sample = training_sample.prepare()
+    # python will raise an error here if any cond_datasets are set to back multiple train_datasets
+    # this would be a problem since we wouldn't know how to prepare our sample
+    cond_mapping = {y: x for (x, y) in StateTracker.get_conditioning_mappings()}
+
+    if data_backend_id in cond_mapping:
+        conditioning_sample_path = training_sample.image_path()
+        # locate the partner backend id
+        train_id = cond_mapping[data_backend_id]
+        train_data_backend = StateTracker.get_data_backend(train_id)
+        train_sample_path = training_sample.training_sample_path(
+            training_dataset_id=train_id
+        )
+        cond_meta = StateTracker.get_metadata_by_filepath(
+            conditioning_sample_path, data_backend_id=data_backend_id
+        )
+        if not cond_meta:
+            train_meta = train_data_backend[
+                "metadata_backend"
+            ].get_metadata_by_filepath(train_sample_path)
+            prepared_sample = training_sample.prepare_like(
+                TrainingSample(
+                    image=None,
+                    data_backend_id=train_id,
+                    image_metadata=train_meta,
+                    image_path=train_sample_path,
+                    model=model,
+                )
+            )
+        else:
+            # prepare the sample independently of the training sample,
+            # since the metadata scan built an element for this.
+            # a metadata object will exist for conditioning samples that
+            # have their dataset configured to operate somewhat independently.
+            prepared_sample = training_sample.prepare()
+    else:
+        # If this VAECache is attached to a *training* dataset, we prepare the
+        # sample for training, which includes cropping and resizing.
+        prepared_sample = training_sample.prepare()
+
     return (
         prepared_sample.image,
         prepared_sample.crop_coordinates,
@@ -49,20 +96,23 @@ def prepare_sample(
     )
 
 
-class VAECache:
+class VAECache(WebhookMixin):
     def __init__(
         self,
         id: str,
+        model,
         vae,
         accelerator,
         metadata_backend: MetadataBackend,
         instance_data_dir: str,
         image_data_backend: BaseDataBackend,
+        webhook_progress_interval: int = 100,
         cache_data_backend: BaseDataBackend = None,
         cache_dir="vae_cache",
         resolution: float = 1024,
         maximum_image_size: float = None,
         target_downsample_size: float = None,
+        num_video_frames: int = 125,
         delete_problematic_images: bool = False,
         write_batch_size: int = 25,
         read_batch_size: int = 25,
@@ -73,9 +123,11 @@ class VAECache:
         max_workers: int = 32,
         vae_cache_ondemand: bool = False,
         hash_filenames: bool = False,
+        dataset_type: str = None,
     ):
         self.id = id
-        if image_data_backend.id != id:
+        self.dataset_type = dataset_type
+        if image_data_backend and image_data_backend.id != id:
             raise ValueError(
                 f"VAECache received incorrect image_data_backend: {image_data_backend}"
             )
@@ -87,25 +139,33 @@ class VAECache:
         self.vae = vae
         self.accelerator = accelerator
         self.cache_dir = cache_dir
-        if self.cache_data_backend.type == "local":
-            self.cache_dir = os.path.abspath(self.cache_dir)
         if len(self.cache_dir) > 0 and self.cache_dir[-1] == "/":
             # Remove trailing slash
             self.cache_dir = self.cache_dir[:-1]
+        if self.cache_data_backend and self.cache_data_backend.type in [
+            "local",
+            "huggingface",
+        ]:
+            self.cache_dir = os.path.abspath(self.cache_dir)
+            self.cache_data_backend.create_directory(self.cache_dir)
         self.resolution = resolution
         self.resolution_type = resolution_type
         self.minimum_image_size = minimum_image_size
-        self.cache_data_backend.create_directory(self.cache_dir)
+        self.webhook_progress_interval = webhook_progress_interval
         self.delete_problematic_images = delete_problematic_images
         self.write_batch_size = write_batch_size
         self.read_batch_size = read_batch_size
         self.process_queue_size = process_queue_size
         self.vae_batch_size = vae_batch_size
         self.instance_data_dir = instance_data_dir
-        self.transform = MultiaspectImage.get_image_transforms()
+        self.model = model
+        self.transform_sample = model.get_transforms(dataset_type=dataset_type)
+        self.num_video_frames = None
+        if self.dataset_type == "video":
+            self.num_video_frames = num_video_frames
         self.rank_info = rank_info()
         self.metadata_backend = metadata_backend
-        if not self.metadata_backend.image_metadata_loaded:
+        if self.metadata_backend and not self.metadata_backend.image_metadata_loaded:
             self.metadata_backend.load_image_metadata()
 
         self.vae_cache_ondemand = vae_cache_ondemand
@@ -141,8 +201,9 @@ class VAECache:
         subfolders = ""
         if self.instance_data_dir is not None:
             subfolders = os.path.dirname(filepath).replace(self.instance_data_dir, "")
-        if len(subfolders) > 0 and subfolders[0] == "/" and self.cache_dir[0] != "/":
-            subfolders = subfolders[1:]
+            subfolders = subfolders.lstrip(os.sep)
+
+        if len(subfolders) > 0:
             full_filename = os.path.join(self.cache_dir, subfolders, base_filename)
             # logger.debug(
             #     f"full_filename: {full_filename} = os.path.join({self.cache_dir}, {subfolders}, {base_filename})"
@@ -157,10 +218,6 @@ class VAECache:
     def _image_filename_from_vaecache_filename(self, filepath: str) -> tuple[str, str]:
         test_filepath, _ = self.generate_vae_cache_filename(filepath)
         result = self.vae_path_to_image_path.get(test_filepath, None)
-        if result is None:
-            raise ValueError(
-                f"Could not find image path for cache file {filepath} (test_filepath: {test_filepath}). This occurs when you toggle the value for hashed_filenames without clearing your VAE cache. If it still occurs after clearing the cache, please open an issue: https://github.com/bghira/simpletuner/issues"
-            )
 
         return result
 
@@ -204,7 +261,13 @@ class VAECache:
                     )
                 raise e
         try:
-            return self.cache_data_backend.torch_load(filename).to("cpu")
+            torch_data = self.cache_data_backend.torch_load(filename)
+            if isinstance(torch_data, torch.Tensor):
+                torch_data = torch_data.to("cpu")
+            elif isinstance(torch_data, dict):
+                torch_data["latents"] = torch_data["latents"].to("cpu")
+
+            return torch_data
         except Exception as e:
             if hide_errors:
                 self.debug_log(
@@ -237,6 +300,7 @@ class VAECache:
             data_backend_id=self.id,
         )
         # This isn't returned, because we merely check if it's stored, or, store it.
+        logger.debug(f"Checking {self.cache_dir=}")
         (
             StateTracker.get_vae_cache_files(data_backend_id=self.id)
             or StateTracker.set_vae_cache_files(
@@ -253,7 +317,14 @@ class VAECache:
         return all_image_files
 
     def init_vae(self):
-        from diffusers import AutoencoderKL
+        if StateTracker.get_args().model_family == "sana":
+            from diffusers import AutoencoderDC as AutoencoderClass
+        elif StateTracker.get_args().model_family == "ltxvideo":
+            from diffusers import AutoencoderKLLTXVideo as AutoencoderClass
+        elif StateTracker.get_args().model_family == "wan":
+            from diffusers import AutoencoderKLWan as AutoencoderClass
+        else:
+            from diffusers import AutoencoderKL as AutoencoderClass
 
         args = StateTracker.get_args()
         vae_path = (
@@ -261,16 +332,7 @@ class VAECache:
             if args.pretrained_vae_model_name_or_path is None
             else args.pretrained_vae_model_name_or_path
         )
-        precached_vae = StateTracker.get_vae()
-        self.vae = precached_vae or AutoencoderKL.from_pretrained(
-            vae_path,
-            subfolder="vae" if args.pretrained_vae_model_name_or_path is None else None,
-            revision=args.revision,
-            force_upcast=False,
-        ).to(self.accelerator.device)
-        if self.vae.device != self.accelerator.device:
-            self.vae = self.vae.to(self.accelerator.device)
-        StateTracker.set_vae(self.vae)
+        self.vae = self.model.get_vae()
 
     def rebuild_cache(self):
         """
@@ -336,9 +398,8 @@ class VAECache:
                 try:
                     future.result()
                 except Exception as e:
-                    logger.error(f"Error deleting file {filename}: {e}")
-                    self.debug_log(f"Error traceback: {traceback.format_exc()}")
-                    raise e
+                    logger.debug(f"Error deleting file {filename}", e)
+
         # Clear the StateTracker list of VAE objects:
         StateTracker.set_vae_cache_files([], data_backend_id=self.id)
 
@@ -357,7 +418,7 @@ class VAECache:
 
     def discover_unprocessed_files(self, directory: str = None):
         """Identify files that haven't been processed yet."""
-        all_image_files = StateTracker.get_image_files(data_backend_id=self.id)
+        all_image_files = set(StateTracker.get_image_files(data_backend_id=self.id))
         existing_cache_files = set(
             StateTracker.get_vae_cache_files(data_backend_id=self.id)
         )
@@ -366,8 +427,9 @@ class VAECache:
         for cache_file in existing_cache_files:
             try:
                 n = self._image_filename_from_vaecache_filename(cache_file)
+                if n is None:
+                    continue
                 already_cached_images.append(n)
-                # print(f"Mapping: {n} -> {cache_file}")
             except Exception as e:
                 logger.error(
                     f"Could not find image path for cache file {cache_file}: {e}"
@@ -375,9 +437,24 @@ class VAECache:
                 continue
 
         # Identify unprocessed files
-        self.local_unprocessed_files = [
-            file for file in all_image_files if file not in already_cached_images
-        ]
+        self.local_unprocessed_files = list(
+            set(all_image_files) - set(already_cached_images)
+        )
+        # this gate is so that we don't bother converting the set to a list unless we're actually going to log them.
+        if os.environ.get("SIMPLETUNER_LOG_LEVEL", None) == "DEBUG":
+            # print first five of each all_image_files and already_cached_images
+            self.debug_log(
+                f"All ({len(all_image_files)}) image files: (truncated) {list(all_image_files)[:5]}"
+            )
+            self.debug_log(
+                f"Existing cache files: (truncated) {list(existing_cache_files)[:5]}"
+            )
+            self.debug_log(
+                f"Already cached images: (truncated) {already_cached_images[:5]}"
+            )
+            self.debug_log(
+                f"VAECache Mapping: (truncated) {list(self.image_path_to_vae_path.items())[:5]}"
+            )
 
         return self.local_unprocessed_files
 
@@ -386,7 +463,6 @@ class VAECache:
         bucket: str,
         aspect_bucket_cache: dict,
         processed_images: dict,
-        do_shuffle: bool = True,
     ):
         """
         Given a bucket, return the relevant files for that bucket.
@@ -415,13 +491,88 @@ class VAECache:
             #     f"Reduce bucket {bucket}, adding ({len(relevant_files)}/{total_files}) {full_image_path}"
             # )
             relevant_files.append(full_image_path)
-        if do_shuffle:
-            shuffle(relevant_files)
-        # self.debug_log(
-        #     f"Reduced bucket {bucket} down from {len(aspect_bucket_cache[bucket])} to {len(relevant_files)} relevant files."
-        #     f" Our system has {len(self.local_unprocessed_files)} total images in its assigned slice for processing across all buckets."
-        # )
+        self.debug_log(
+            f"Reduced bucket {bucket} down from {len(aspect_bucket_cache[bucket])} to {len(relevant_files)} relevant files."
+            f" Our system has {len(self.local_unprocessed_files)} total images in its assigned slice for processing across all buckets."
+        )
         return relevant_files
+
+    def prepare_video_latents(self, samples):
+        if StateTracker.get_model_family() in ["ltxvideo", "wan"]:
+            if samples.ndim == 4:
+                original_shape = samples.shape
+                samples = samples.unsqueeze(2)
+                logger.debug(
+                    "PROCESSING IMAGE to VIDEO LATENTS CONVERSION ({original_shape} to {samples.shape})"
+                )
+            assert samples.ndim == 5, f"Expected 5D tensor, got {samples.ndim}D tensor"
+            logger.debug(
+                f"PROCESSING VIDEO to VIDEO LATENTS CONVERSION ({samples.shape})"
+            )
+            # images are torch.Size([1, 3, 1, 640, 448]) (B, C, F, H, W) but videos are torch.Size([1, 600, 3, 384, 395]) (B, F, C, H, W)
+            # we have to permute the video latent samples to match the image latent samples
+            num_frames = samples.shape[1]
+            if samples.shape[2] == 3:
+                original_shape = samples.shape
+                samples = samples.permute(0, 2, 1, 3, 4)  # (B, C, F, H, W)
+                num_frames = samples.shape[2]
+                logger.debug(
+                    f"Found video latent of shape: {original_shape} (B, F, C, H, W) to (B, C, F, H, W) {samples.shape}"
+                )
+
+            num_frames = samples.shape[1]
+            if (
+                self.num_video_frames is not None
+                and self.num_video_frames != num_frames
+            ):
+                # we'll discard along dim2 after num_video_frames
+                samples = samples[:, :, : self.num_video_frames, :, :]
+        elif StateTracker.get_model_family() in ["hunyuan-video", "mochi"]:
+            raise Exception(
+                f"{StateTracker.get_model_family()} not supported for VAE Caching yet."
+            )
+        logger.debug(f"Final samples shape: {samples.shape}")
+        return samples
+
+    def process_video_latents(self, latents_uncached):
+        output_cache_entry = latents_uncached
+        if StateTracker.get_model_family() in ["ltxvideo"]:
+            # hardcode patch size to 1 for LTX Video.
+            # patch_size, patch_size_t = self.transformer.config.patch_size, self.transformer.config.patch_size_t
+            patch_size, patch_size_t = 1, 1
+            _, _, num_frames, height, width = latents_uncached.shape
+            logger.debug(f"Latents shape: {latents_uncached.shape}")
+            latents_uncached = normalize_ltx_latents(
+                latents_uncached, self.vae.latents_mean, self.vae.latents_std
+            )
+
+            output_cache_entry = {
+                "latents": latents_uncached.shape,  # we'll log the shape first
+                "num_frames": self.num_video_frames,
+                "height": height,
+                "width": width,
+            }
+            logger.debug(f"Video latent processing results: {output_cache_entry}")
+            # we'll now overwrite the latents after logging.
+            output_cache_entry["latents"] = latents_uncached
+        elif StateTracker.get_model_family() in ["wan"]:
+            logger.debug(
+                f"Shape for Wan VAE encode: {latents_uncached.shape} with latents_mean: {self.vae.latents_mean} and latents_std: {self.vae.latents_std}"
+            )
+            posterior = compute_wan_posterior(
+                latents_uncached, self.vae.latents_mean, self.vae.latents_std
+            )
+            # Sample from the posterior
+            latents_uncached = posterior.sample()
+
+            # For video, return just the tensor
+            output_cache_entry = latents_uncached
+        elif StateTracker.get_model_family() in ["hunyuan-video", "mochi"]:
+            raise Exception(
+                f"{StateTracker.get_model_family()} not supported for VAE Caching yet."
+            )
+
+        return output_cache_entry
 
     def encode_images(self, images, filepaths, load_from_cache=True):
         """
@@ -516,9 +667,33 @@ class VAECache:
                 processed_images = torch.stack(uncached_images).to(
                     self.accelerator.device, dtype=StateTracker.get_vae_dtype()
                 )
-                latents_uncached = self.vae.encode(
+                processed_images = self.prepare_video_latents(processed_images)
+                processed_images = self.model.pre_vae_encode_transform_sample(
                     processed_images
-                ).latent_dist.sample()
+                )
+                latents_uncached = self.vae.encode(processed_images)
+                latents_uncached = self.model.post_vae_encode_transform_sample(
+                    latents_uncached
+                )
+
+                # For Wan, get the raw parameters (32 channels)
+                if StateTracker.get_model_family() in ["wan"]:
+                    if hasattr(latents_uncached, "latent_dist"):
+                        # This is 32 channels (mu + logvar)
+                        latents_uncached = latents_uncached.latent_dist.parameters
+                    # Process will normalize and sample, returning 16 channels
+                    latents_uncached = self.process_video_latents(latents_uncached)
+                else:
+                    # For other models, sample first
+                    if hasattr(latents_uncached, "latent_dist"):
+                        latents_uncached = latents_uncached.latent_dist.sample()
+                    elif hasattr(latents_uncached, "sample"):
+                        latents_uncached = latents_uncached.sample()
+                    # Then process
+                    latents_uncached = self.process_video_latents(latents_uncached)
+
+                # Now latents_uncached should be 16 channels for Wan
+                # Apply scaling factors
                 if (
                     hasattr(self.vae, "config")
                     and hasattr(self.vae.config, "shift_factor")
@@ -526,20 +701,63 @@ class VAECache:
                 ):
                     latents_uncached = (
                         latents_uncached - self.vae.config.shift_factor
-                    ) * self.vae.config.scaling_factor
-                else:
-                    latents_uncached = latents_uncached * self.vae.config.scaling_factor
-                logger.debug(f"Latents shape: {latents_uncached.shape}")
-
+                    ) * getattr(
+                        self.model,
+                        "AUTOENCODER_SCALING_FACTOR",
+                        self.vae.config.scaling_factor,
+                    )
+                elif isinstance(latents_uncached, torch.Tensor) and hasattr(
+                    self.vae.config, "scaling_factor"
+                ):
+                    latents_uncached = latents_uncached * getattr(
+                        self.model,
+                        "AUTOENCODER_SCALING_FACTOR",
+                        self.vae.config.scaling_factor,
+                    )
+                    logger.debug(
+                        f"Latents shape after scaling: {latents_uncached.shape}"
+                    )
             # Prepare final latents list by combining cached and newly computed latents
-            cached_idx, uncached_idx = 0, 0
-            for i in range(batch_size):
-                if i in uncached_image_indices:
-                    latents.append(latents_uncached[uncached_idx])
-                    uncached_idx += 1
-                else:
-                    latents.append(self._read_from_storage(full_filenames[i]))
-                    cached_idx += 1
+            if isinstance(latents_uncached, dict) and "latents" in latents_uncached:
+                # video models tend to return a dict with latents.
+                raw_latents = latents_uncached["latents"]
+                num_samples = raw_latents.shape[0]
+                for i in range(num_samples):
+                    # Each sub-dict is shape [1, 128, F, H, W]
+                    single_latent = raw_latents[i : i + 1].squeeze(0)
+                    chunk = {
+                        "latents": single_latent,
+                        "num_frames": latents_uncached["num_frames"],
+                        "height": latents_uncached["height"],
+                        "width": latents_uncached["width"],
+                    }
+                    latents.append(chunk)
+            elif hasattr(latents_uncached, "latent"):
+                # this one happens with sana really, so far.
+                raw_latents = latents_uncached["latent"]
+                num_samples = raw_latents.shape[0]
+                for i in range(num_samples):
+                    # Each sub-dict is shape [b, c, H, W], we want just 1 b at a time
+                    single_latent = raw_latents[i : i + 1].squeeze(0)
+                    logger.debug(f"Adding shape: {single_latent.shape}")
+                    latents.append(single_latent)
+            elif isinstance(latents_uncached, torch.Tensor):
+                # it seems like sdxl and some others end up here
+                cached_idx, uncached_idx = 0, 0
+                for i in range(batch_size):
+                    if i in uncached_image_indices:
+                        # logger.info(
+                        #     f"Adding latent {uncached_idx} of ({len(latents_uncached)}: {latents_uncached})"
+                        # )
+                        latents.append(latents_uncached[uncached_idx])
+                        uncached_idx += 1
+                    else:
+                        latents.append(self._read_from_storage(full_filenames[i]))
+                        cached_idx += 1
+            else:
+                raise ValueError(
+                    f"Unknown handler for latent encoding type: {type(latents_uncached)}"
+                )
         return latents
 
     def _write_latents_in_batch(self, input_latents: list = None):
@@ -562,7 +780,11 @@ class VAECache:
                 )
             filepaths.append(output_file)
             # pytorch will hold onto all of the tensors in the list if we do not use clone()
-            latents.append(latent_vector.clone())
+            if isinstance(latent_vector, dict):
+                latent_vector["latents"] = latent_vector["latents"].clone()
+                latents.append(latent_vector)
+            else:
+                latents.append(latent_vector.clone())
 
         self.cache_data_backend.write_batch(filepaths, latents)
 
@@ -626,6 +848,7 @@ class VAECache:
                         prepare_sample,
                         data_backend_id=self.id,
                         filepath=data[0],
+                        model=self.model,
                     )
                     for data in initial_data
                 ]
@@ -680,7 +903,7 @@ class VAECache:
                 filepath, _, aspect_bucket = initial_data[idx]
                 filepaths.append(filepath)
 
-                pixel_values = self.transform(image).to(
+                pixel_values = self.transform_sample(image).to(
                     self.accelerator.device, dtype=self.vae.dtype
                 )
                 output_value = (pixel_values, filepath, aspect_bucket, is_final_sample)
@@ -700,7 +923,9 @@ class VAECache:
                             attribute="crop_coordinates",
                         )
                     )
-                    if tuple(current_crop_coordinates) != tuple(crop_coordinates):
+                    if current_crop_coordinates is not None and tuple(
+                        current_crop_coordinates
+                    ) != tuple(crop_coordinates):
                         logger.debug(
                             f"Should be updating crop_coordinates for {filepath} from {current_crop_coordinates} to {crop_coordinates}. But we won't.."
                         )
@@ -741,13 +966,19 @@ class VAECache:
                 count_to_process = min(qlen, self.vae_batch_size)
                 for idx in range(0, count_to_process):
                     if image_pixel_values:
-                        pixel_values, filepath, aspect_bucket, is_final_sample = (
-                            image_pixel_values.pop()
-                        )
+                        (
+                            pixel_values,
+                            filepath,
+                            aspect_bucket,
+                            is_final_sample,
+                        ) = image_pixel_values.pop()
                     else:
-                        pixel_values, filepath, aspect_bucket, is_final_sample = (
-                            self.vae_input_queue.get()
-                        )
+                        (
+                            pixel_values,
+                            filepath,
+                            aspect_bucket,
+                            is_final_sample,
+                        ) = self.vae_input_queue.get()
 
                     if batch_aspect_bucket is None:
                         batch_aspect_bucket = aspect_bucket
@@ -789,6 +1020,10 @@ class VAECache:
                     qlen = self.vae_input_queue.qsize()
         except Exception as e:
             logger.error(f"Error encoding images {vae_input_filepaths}: {e}")
+            if "out of memory" in str(e).lower():
+                import sys
+
+                sys.exit(1)
             # Remove all of the errored images from the bucket. They will be captured on restart.
             for filepath in vae_input_filepaths:
                 self.metadata_backend.remove_image(filepath)
@@ -900,7 +1135,9 @@ class VAECache:
 
     def process_buckets(self):
         futures = []
+        self.debug_log("Listing cached images")
         processed_images = self._list_cached_images()
+        self.debug_log("Reading the cache and copying")
         aspect_bucket_cache = self.metadata_backend.read_cache().copy()
 
         # Extract and shuffle the keys of the dictionary
@@ -911,10 +1148,21 @@ class VAECache:
             shuffled_keys = list(aspect_bucket_cache.keys())
             shuffle(shuffled_keys)
 
+        if self.webhook_handler is not None:
+            total_count = len(
+                [item for sublist in aspect_bucket_cache.values() for item in sublist]
+            )
+            self.send_progress_update(
+                type="init_cache_vae_processing_started",
+                progress=int(len(processed_images) / total_count * 100),
+                total=total_count,
+                current=len(processed_images),
+            )
+
         with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
             for bucket in shuffled_keys:
                 relevant_files = self._reduce_bucket(
-                    bucket, aspect_bucket_cache, processed_images, do_shuffle
+                    bucket, aspect_bucket_cache, processed_images
                 )
                 if len(relevant_files) == 0:
                     continue
@@ -924,6 +1172,8 @@ class VAECache:
                     "cached": 0,
                     "total": 0,
                 }
+                last_reported_index = 0
+
                 for raw_filepath in tqdm(
                     relevant_files,
                     desc=f"Processing bucket {bucket}",
@@ -936,6 +1186,8 @@ class VAECache:
                     test_filepath = self._image_filename_from_vaecache_filename(
                         filepath
                     )
+                    if test_filepath is None:
+                        continue
                     if test_filepath not in self.local_unprocessed_files:
                         statistics["not_local"] += 1
                         continue
@@ -968,6 +1220,26 @@ class VAECache:
                                 self._encode_images_in_batch
                             )
                             futures.append(future_to_process)
+                            if (
+                                self.webhook_handler is not None
+                                and int(
+                                    statistics["total"]
+                                    // self.webhook_progress_interval
+                                )
+                                > last_reported_index
+                            ):
+                                last_reported_index = (
+                                    statistics["total"]
+                                    // self.webhook_progress_interval
+                                )
+                                self.send_progress_update(
+                                    type="vaecache",
+                                    progress=int(
+                                        statistics["total"] / len(relevant_files) * 100
+                                    ),
+                                    total=len(relevant_files),
+                                    current=statistics["total"],
+                                )
 
                         # If we have accumulated enough write objects, we can write them to disk at once.
                         if self.write_queue.qsize() >= self.write_batch_size:
@@ -985,8 +1257,14 @@ class VAECache:
 
                     # Now, see if we have any futures to complete, and execute them.
                     # Cleanly removes futures from the list, once they are completed.
-                    futures = self._process_futures(futures, executor)
-
+                    try:
+                        futures = self._process_futures(futures, executor)
+                    except Exception as e:
+                        logger.error(
+                            f"Error processing futures for bucket {bucket}: {e}, traceback: {traceback.format_exc()}"
+                        )
+                        continue
+                logger.debug(f"bucket {bucket} statistics: {statistics}")
                 try:
                     # Handle remainders after processing the bucket
                     if self.read_queue.qsize() > 0:
@@ -1023,8 +1301,16 @@ class VAECache:
                     log_msg = (
                         f"(id={self.id}) Bucket {bucket} caching results: {statistics}"
                     )
-                    logger.debug(log_msg)
-                    tqdm.write(log_msg)
+                    if get_rank() == 0:
+                        logger.debug(log_msg)
+                        tqdm.write(log_msg)
+                    if self.webhook_handler is not None:
+                        self.send_progress_update(
+                            type="init_cache_vae_processing_complete",
+                            progress=100,
+                            total=statistics["total"],
+                            current=statistics["total"],
+                        )
                     self.debug_log(
                         "Completed process_buckets, all futures have been returned."
                     )

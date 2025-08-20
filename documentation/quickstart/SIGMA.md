@@ -4,7 +4,7 @@ In this example, we'll be training a PixArt Sigma model using the SimpleTuner to
 
 ### Prerequisites
 
-Make sure that you have python installed; SimpleTuner does well with 3.10 or 3.11. **Python 3.12 should not be used**.
+Make sure that you have python installed; SimpleTuner does well with 3.10 through 3.12.
 
 You can check this by running:
 
@@ -12,15 +12,15 @@ You can check this by running:
 python --version
 ```
 
-If you don't have python 3.11 installed on Ubuntu, you can try the following:
+If you don't have python 3.12 installed on Ubuntu, you can try the following:
 
 ```bash
-apt -y install python3.11 python3.11-venv
+apt -y install python3.12 python3.12-venv
 ```
 
 #### Container image dependencies
 
-For Vast, RunPod, and TensorDock (among others), the following will work on a CUDA 12.2-12.4 image:
+For Vast, RunPod, and TensorDock (among others), the following will work on a CUDA 12.2-12.8 image:
 
 ```bash
 apt -y install nvidia-cuda-toolkit libgl1-mesa-glx
@@ -42,19 +42,34 @@ python -m venv .venv
 source .venv/bin/activate
 
 pip install -U poetry pip
+
+# Necessary on some systems to prevent it from deciding it knows better than us.
+poetry config virtualenvs.create false
 ```
 
 Depending on your system, you will run one of 3 commands:
 
 ```bash
-# MacOS
-poetry install --no-root -C install/apple
+# Linux with NVIDIA
+poetry install
 
-# Linux
-poetry install --no-root
+# MacOS
+poetry install -C install/apple
 
 # Linux with ROCM
-poetry install --no-root -C install/rocm
+poetry install -C install/rocm
+```
+
+#### AMD ROCm follow-up steps
+
+The following must be executed for an AMD MI300X to be useable:
+
+```bash
+apt install amd-smi-lib
+pushd /opt/rocm/share/amd_smi
+python3 -m pip install --upgrade pip
+python3 -m pip install .
+popd
 ```
 
 #### Removing DeepSpeed & Bits n Bytes
@@ -82,30 +97,42 @@ To run it:
 ```bash
 python configure.py
 ```
+> ⚠️ For users located in countries where Hugging Face Hub is not readily accessible, you should add `HF_ENDPOINT=https://hf-mirror.com` to your `~/.bashrc` or `~/.zshrc` depending on which `$SHELL` your system uses.
 
 If you prefer to manually configure:
 
-Copy `config/config.env.example` to `config/config.env`:
+Copy `config/config.json.example` to `config/config.json`:
 
 ```bash
-cp config/config.env.example config/config.env
+cp config/config.json.example config/config.json
 ```
 
 There, you will need to modify the following variables:
 
+```json
+{
+  "model_type": "full",
+  "use_bitfit": false,
+  "pretrained_model_name_or_path": "pixart-alpha/pixart-sigma-xl-2-1024-ms",
+  "model_family": "pixart_sigma",
+  "output_dir": "/home/user/output/models",
+  "validation_resolution": "1024x1024,1280x768",
+  "validation_guidance": 3.5
+}
+```
+
+- `pretrained_model_name_or_path` - Set this to `PixArt-alpha/PixArt-Sigma-XL-2-1024-MS`.
 - `MODEL_TYPE` - Set this to `full`.
 - `USE_BITFIT` - Set this to `false`.
-- `PIXART_SIGMA` - Set this to `true`.
-- `MODEL_NAME` - Set this to `PixArt-alpha/PixArt-Sigma-XL-2-1024-MS`.
-- `OUTPUT_DIR` - Set this to the directory where you want to store your outputs and datasets. It's recommended to use a full path here.
+- `MODEL_FAMILY` - Set this to `pixart_sigma`.
+- `OUTPUT_DIR` - Set this to the directory where you want to store your checkpoints and validation images. It's recommended to use a full path here.
 - `VALIDATION_RESOLUTION` - As PixArt Sigma comes in a 1024px or 2048xp model format, you should carefully set this to `1024x1024` for this example.
   - Additionally, PixArt was fine-tuned on multi-aspect buckets, and other resolutions may be specified using commas to separate them: `1024x1024,1280x768`
 - `VALIDATION_GUIDANCE` - PixArt benefits from a very-low value. Set this between `3.6` to `4.4`.
 
 There are a few more if using a Mac M-series machine:
 
-- `MIXED_PRECISION` should be set to `no`.
-- `USE_XFORMERS` should be set to `false`.
+- `mixed_precision` should be set to `no`.
 
 #### Dataset considerations
 
@@ -113,7 +140,7 @@ It's crucial to have a substantial dataset to train your model on. There are lim
 
 Depending on the dataset you have, you will need to set up your dataset directory and dataloader configuration file differently. In this example, we will be using [pseudo-camera-10k](https://huggingface.co/datasets/ptx0/pseudo-camera-10k) as the dataset.
 
-In your `OUTPUT_DIR` directory, create a multidatabackend.json:
+In your `/home/user/simpletuner/config` directory, create a multidatabackend.json:
 
 ```json
 [
@@ -129,11 +156,11 @@ In your `OUTPUT_DIR` directory, create a multidatabackend.json:
     "target_downsample_size": 1.0,
     "resolution_type": "area",
     "cache_dir_vae": "cache/vae/pixart/pseudo-camera-10k",
-    "instance_data_dir": "datasets/pseudo-camera-10k",
+    "instance_data_dir": "/home/user/simpletuner/datasets/pseudo-camera-10k",
     "disabled": false,
     "skip_file_discovery": "",
     "caption_strategy": "filename",
-    "metadata_backend": "json"
+    "metadata_backend": "discovery"
   },
   {
     "id": "text-embeds",
@@ -147,13 +174,12 @@ In your `OUTPUT_DIR` directory, create a multidatabackend.json:
 ]
 ```
 
-Then, navigate to the `OUTPUT_DIR` directory and create a `datasets` directory:
+Then, create a `datasets` directory:
 
 ```bash
-apt -y install git-lfs
 mkdir -p datasets
 pushd datasets
-    git clone https://huggingface.co/datasets/ptx0/pseudo-camera-10k
+    huggingface-cli download --repo-type=dataset bghira/pseudo-camera-10k --local-dir=pseudo-camera-10k
 popd
 ```
 
@@ -161,7 +187,7 @@ This will download about 10k photograph samples to your `datasets/pseudo-camera-
 
 #### Login to WandB and Huggingface Hub
 
-You'll want to login to WandB and HF Hub before beginning training, especially if you're using `PUSH_TO_HUB=true` and `--report_to=wandb`.
+You'll want to login to WandB and HF Hub before beginning training, especially if you're using `push_to_hub: true` and `--report_to=wandb`.
 
 If you're going to be pushing items to a Git LFS repository manually, you should also run `git config --global credential.helper store`
 
@@ -190,3 +216,17 @@ bash train.sh
 This will begin the text embed and VAE output caching to disk.
 
 For more information, see the [dataloader](/documentation/DATALOADER.md) and [tutorial](/TUTORIAL.md) documents.
+
+### CLIP score tracking
+
+If you wish to enable evaluations to score the model's performance, see [this document](/documentation/evaluation/CLIP_SCORES.md) for information on configuring and interpreting CLIP scores.
+
+# Stable evaluation loss
+
+If you wish to use stable MSE loss to score the model's performance, see [this document](/documentation/evaluation/EVAL_LOSS.md) for information on configuring and interpreting evaluation loss.
+
+### SageAttention
+
+When using `--attention_mechanism=sageattention`, inference can be sped-up at validation time.
+
+**Note**: This isn't compatible with _every_ model configuration, but it's worth trying.

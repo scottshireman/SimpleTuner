@@ -5,25 +5,64 @@ import os
 import numpy as np
 from math import sqrt
 from helpers.training.state_tracker import StateTracker
+from helpers.models.common import VideoModelFoundation, ImageModelFoundation
 
 logger = logging.getLogger("MultiaspectImage")
 logger.setLevel(os.environ.get("SIMPLETUNER_IMAGE_PREP_LOG_LEVEL", "INFO"))
 
+import torch
+from torchvision import transforms
+from PIL import Image
+import numpy as np
+
 
 class MultiaspectImage:
     @staticmethod
-    def get_image_transforms():
-        return transforms.Compose(
-            [
-                transforms.ToTensor(),
-                transforms.Normalize([0.5], [0.5]),
-            ]
-        )
+    def limit_canvas_size(width: int, height: int, max_size: int) -> dict:
+        """
+        Limit the canvas size to a maximum value.
+        If the canvas size exceeds the maximum, it will be reduced proportionally.
+        It's important that the canvas size returned by this function is used for cropping,
+          since the aspect ratio of the canvas size is not guaranteed to match the
+          aspect ratio of the original image.
+
+        Args:
+            width (int): The width of the image.
+            height (int): The height of the image.
+            max_size (int): The maximum allowed canvas size.
+
+        Returns:
+            dict: A dictionary containing the adjusted width, height, and canvas size.
+        """
+        if width * height <= max_size:
+            # If the canvas size is already within limits, return the original dimensions.
+            return {"width": width, "height": height, "canvas_size": width * height}
+
+        align = StateTracker.get_args().aspect_bucket_alignment
+        dims = [("width", width), ("height", height)]
+
+        # Sort by size descending
+        dims.sort(key=lambda x: x[1], reverse=True)
+        # Subtract alignment from the larger dimension
+        if dims[0][0] == "width":
+            width -= align
+        else:
+            height -= align
+
+        # If still too large, subtract from the other dimension.
+        # Note: we're sorting by the original width and height values here to ensure we adjust the originally-smaller-dimension.
+        if width * height > max_size:
+            if dims[1][0] == "width":
+                width -= align
+            else:
+                height -= align
+
+        return {"width": width, "height": height, "canvas_size": width * height}
 
     @staticmethod
-    def _round_to_nearest_multiple(value):
+    def _round_to_nearest_multiple(value, override_value: int = None):
         """Round a value to the nearest multiple."""
-        multiple = StateTracker.get_args().aspect_bucket_alignment
+        multiple = override_value or StateTracker.get_args().aspect_bucket_alignment
         rounded = round(value / multiple) * multiple
         return max(rounded, multiple)  # Ensure it's at least the value of 'multiple'
 
@@ -124,6 +163,13 @@ class MultiaspectImage:
             logger.debug(
                 f"Returning the square edge {target_pixel_edge}x{target_pixel_edge} as the target size and original size as intermediary."
             )
+            if W_initial == H_initial:
+                # if we have squares, resizing straight to the target is alright.
+                return (
+                    (target_pixel_edge, target_pixel_edge),
+                    (target_pixel_edge, target_pixel_edge),
+                    aspect_ratio,
+                )
             return (
                 (target_pixel_edge, target_pixel_edge),
                 (W_initial, H_initial),
@@ -257,10 +303,22 @@ class MultiaspectImage:
         elif isinstance(image, float):
             # An externally-calculated aspect ratio was given to round.
             return round(image, to_round)
+        elif isinstance(image, np.ndarray):
+            # A video was passed in as a numpy array.
+            width, height = image.shape[2], image.shape[1]
         else:
+            raise ValueError(f"Unexpected type {image}")
             width, height = image.size
         aspect_ratio = round(width / height, to_round)
         return aspect_ratio
+
+    @staticmethod
+    def numpy_list_to_pil(numpy_list):
+        if isinstance(numpy_list, list) and isinstance(numpy_list[0], np.ndarray):
+            numpy_list = [
+                Image.fromarray(np.uint8(image)).convert("RGB") for image in numpy_list
+            ]
+        return numpy_list
 
 
 resize_helpers = {

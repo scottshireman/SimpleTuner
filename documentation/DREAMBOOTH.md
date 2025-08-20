@@ -28,7 +28,74 @@ Since that time, the idea has evolved and debated, with an opposing camp decidin
 
 The model contains something called a "prior" which could, in theory, be preserved during Dreambooth training. In experiments with Stable Diffusion however, it didn't seem to help - the model just overfits on its own knowledge.
 
-> 🔴 Prior preservation loss is not supported in SimpleTuner, all regularisation data is treated as if it were usual training data.
+> 🟢 ([#1031](https://github.com/bghira/SimpleTuner/issues/1031)) Prior preservation loss is supported in SimpleTuner when training LyCORIS adapters by setting `is_regularisation_data` on that dataset.
+
+### Masked loss
+
+Image masks may be defined in pairs with image data. The dark portions of the mask will cause the loss calculations to ignore these parts of the image.
+
+An example [script](/toolkit/datasets/masked_loss/generate_dataset_masks.py) exists to generate these masks, given an input_dir and output_dir:
+
+```bash
+python generate_dataset_masks.py --input_dir /images/input \
+                      --output_dir /images/output \
+                      --text_input "person"
+```
+
+However, this does not have any advanced functionality such as mask padding blurring.
+
+When defining your image mask dataset:
+
+- Every image must have a mask. Use an all-white image if you do not want to mask.
+- Set `dataset_type=conditioning` on your conditioning (mask) data folder
+- Set `conditioning_type=mask` on your mask dataset
+- Set `conditioning_data=` to your conditioning dataset `id` on your image dataset
+
+```json
+[
+    {
+        "id": "dreambooth-data",
+        "type": "local",
+        "dataset_type": "image",
+        "conditioning_data": "dreambooth-conditioning",
+        "instance_data_dir": "/training/datasets/test_datasets/dreambooth",
+        "cache_dir_vae": "/training/cache/vae/sdxl/dreambooth-data",
+        "caption_strategy": "instanceprompt",
+        "instance_prompt": "an dreambooth",
+        "metadata_backend": "discovery",
+        "resolution": 1024,
+        "minimum_image_size": 1024,
+        "maximum_image_size": 1024,
+        "target_downsample_size": 1024,
+        "crop": true,
+        "crop_aspect": "square",
+        "crop_style": "center",
+        "resolution_type": "pixel_area"
+    },
+    {
+        "id": "dreambooth-conditioning",
+        "type": "local",
+        "dataset_type": "conditioning",
+        "instance_data_dir": "/training/datasets/test_datasets/dreambooth_mask",
+        "resolution": 1024,
+        "minimum_image_size": 1024,
+        "maximum_image_size": 1024,
+        "target_downsample_size": 1024,
+        "crop": true,
+        "crop_aspect": "square",
+        "crop_style": "center",
+        "resolution_type": "pixel_area",
+        "conditioning_type": "mask"
+    },
+    {
+        "id": "an example backend for text embeds.",
+        "dataset_type": "text_embeds",
+        "default": true,
+        "type": "local",
+        "cache_dir": "/training/cache/text/sdxl-base/masked_loss"
+    }
+]
+```
 
 ## Setup
 
@@ -36,31 +103,7 @@ Following the [tutorial](/TUTORIAL.md) is required before you can continue into 
 
 For DeepFloyd tuning, it's recommended to visit [this page](/documentation/DEEPFLOYD.md) for specific tips related to that model's setup.
 
-For Stable Diffusion 1.x/2.x/XL, here are recommended configuration values.
-
-Located in `config/config.env`:
-```bash
-TRAIN_BATCH_SIZE=1
-
-LEARNING_RATE=4e-6
-LEARNING_RATE_END=4e-7
-LR_SCHEDULE=cosine
-LR_WARMUP_STEPS=100
-
-OPTIMIZER=adamw_bf16
-
-MAX_NUM_STEPS=1000
-NUM_EPOCHS=0
-
-VALIDATION_STEPS=100
-VALIDATION_PROMPT="a photograph of subjectname"
-
-DATALOADER_CONFIG="config/multidatabackend-dreambooth.json"
-
-TRAINER_EXTRA_ARGS+=" --data_backend_sampling=uniform"    # dreambooth is best with uniform sampling.
-```
-
-### Quantised model training
+### Quantised model training (LoRA/LyCORIS only)
 
 Tested on Apple and NVIDIA systems, Hugging Face Optimum-Quanto can be used to reduce the precision and VRAM requirements.
 
@@ -70,23 +113,20 @@ Inside your SimpleTuner venv:
 pip install optimum-quanto
 ```
 
-```bash
-# choices: int8-quanto, int4-quanto, int2-quanto, fp8-quanto
-# int8-quanto was tested with a single subject dreambooth LoRA.
-# fp8-quanto does not work on Apple systems. you must use int levels.
-# int2-quanto is pretty extreme and gets the whole rank-1 LoRA down to about 13.9GB VRAM.
-# may the gods have mercy on your soul, should you push things Too Far.
-export TRAINER_EXTRA_ARGS="--base_model_precision=int8-quanto"
+Available precision levels depend on your hardware and its capabilities.
 
-# Maybe you want the text encoders to remain full precision so your text embeds are cake.
-# We unload the text encoders before training, so, that's not an issue during training time - only during pre-caching.
-# Alternatively, you can go ham on quantisation here and run them in int4 or int8 mode, because no one can stop you.
-export TRAINER_EXTRA_ARGS="${TRAINER_EXTRA_ARGS} --text_encoder_1_precision=no_change --text_encoder_2_precision=no_change"
+- int2-quanto, int4-quanto, **int8-quanto** (recommended)
+- fp8-quanto, fp8-torchao (only for CUDA >= 8.9, eg. 4090 or H100)
+- nf4-bnb (required for low-VRAM users)
 
-# When you're quantising the model, we're not in pure bf16 anymore.
-# Since adamw_bf16 will never work with this setup, select another optimiser.
-# I know the spelling is different than everywhere else, but we're in too deep to fix it now.
-export OPTIMIZER="optimi-lion" # or maybe optimi-stableadamw
+Inside your config.json, the following values should be modified or added:
+```json
+{
+    "base_model_precision": "int8-quanto",
+    "text_encoder_1_precision": "no_change",
+    "text_encoder_2_precision": "no_change",
+    "text_encoder_3_precision": "no_change"
+}
 ```
 
 Inside our dataloader config `multidatabackend-dreambooth.json`, it will look something like this:
@@ -94,17 +134,30 @@ Inside our dataloader config `multidatabackend-dreambooth.json`, it will look so
 ```json
 [
     {
-        "id": "subjectname-data",
+        "id": "subjectname-data-512px",
         "type": "local",
         "instance_data_dir": "/training/datasets/subjectname",
         "caption_strategy": "instanceprompt",
         "instance_prompt": "subjectname",
         "cache_dir_vae": "/training/vae_cache/subjectname",
-        "repeats": 1,
+        "repeats": 100,
         "crop": false,
-        "resolution": 0.25,
-        "resolution_type": "area",
-        "minimum_image_size": 0.25
+        "resolution": 512,
+        "resolution_type": "pixel_area",
+        "minimum_image_size": 192
+    },
+    {
+        "id": "subjectname-data-1024px",
+        "type": "local",
+        "instance_data_dir": "/training/datasets/subjectname",
+        "caption_strategy": "instanceprompt",
+        "instance_prompt": "subjectname",
+        "cache_dir_vae": "/training/vae_cache/subjectname-1024px",
+        "repeats": 100,
+        "crop": false,
+        "resolution": 1024,
+        "resolution_type": "pixel_area",
+        "minimum_image_size": 768
     },
     {
         "id": "regularisation-data",
@@ -113,11 +166,24 @@ Inside our dataloader config `multidatabackend-dreambooth.json`, it will look so
         "caption_strategy": "instanceprompt",
         "instance_prompt": "a picture of a man",
         "cache_dir_vae": "/training/vae_cache/regularisation",
-        "repeats": 10,
-        "ignore_epochs": true,
-        "resolution": 0.25,
-        "resolution_type": "area",
-        "minimum_image_size": 0.25
+        "repeats": 0,
+        "resolution": 512,
+        "resolution_type": "pixel_area",
+        "minimum_image_size": 192,
+        "is_regularisation_data": true
+    },
+    {
+        "id": "regularisation-data-1024px",
+        "type": "local",
+        "instance_data_dir": "/training/datasets/regularisation",
+        "caption_strategy": "instanceprompt",
+        "instance_prompt": "a picture of a man",
+        "cache_dir_vae": "/training/vae_cache/regularisation-1024px",
+        "repeats": 0,
+        "resolution": 1024,
+        "resolution_type": "pixel_area",
+        "minimum_image_size": 768,
+        "is_regularisation_data": true
     },
     {
         "id": "textembeds",
@@ -131,19 +197,22 @@ Inside our dataloader config `multidatabackend-dreambooth.json`, it will look so
 
 Some key values have been tweaked to make training a single subject easier:
 
-- We now have two datasets configured. Regularisation data is optional, and training may work better without it. You can remove that dataset from the list if desired.
-- Resolution is set to `0.25` which will be approximately 512x512 training, which goes faster for SDXL models, and is the native resolution for 1.5 models.
-- Minimum image size is set to `0.25` which will allow us to upsample some smaller images, which might be needed for datasets with a few important but low resolution images.
+- We now have two datasets configured twice, for a total of four datasets. Regularisation data is optional, and training may work better without it. You can remove that dataset from the list if desired.
+- Resolution is set to 512px and 1024px mixed bucketing which can help improve training speed and convergence
+- Minimum image size is set to 192px or 768px which will allow us to upsample some smaller images, which might be needed for datasets with a few important but low resolution images.
 - `caption_strategy` is now `instanceprompt`, which means we will use `instance_prompt` value for every image in the dataset as its caption.
   - **Note:** Using the instance prompt is the traditional method of Dreambooth training, but short captions may work better. If you find the model fails to generalise, it may be worth attempting to use captions.
 
+### Regularisation dataset considerations
+
 For a regularisation dataset:
 
-- Set `ignore_epochs=true`, which will ensure this dataset does not count toward a "finished epoch"
-  - Also ensure you include `--data_backend_sampling=uniform` in your `TRAINER_EXTRA_ARGS`
-- Set `repeats` high enough that this dataset will never stop being sampled
+- Set `repeats` very high on your Dreambooth subject so that your image count in the Dreambooth data is multiplied `repeats` times to surpass the image count of your regularisation set
+  - If your Regularisation set has 1000 images, and you have 10 images in your training set, you'd want a repeats value of at least 100 to get fast results
 - `minimum_image_size` has been increased to ensure we don't introduce too many low-quality artifacts
 - Similarly, using more descriptive captions may help avoid forgetting. Switching from `instanceprompt` to `textfile` or other strategies will require creating `.txt` files for each image.
+- When `is_regularisation_data` (or 🇺🇸 `is_regularization_data` with a z, for the American users) is set, the data from this set will be fed into the base model to obtain a prediction that can be used as a loss target for the student LyCORIS model.
+  - Note, currently this only functions on a LyCORIS adapter.
 
 ## Selecting an instance prompt
 
@@ -152,6 +221,20 @@ As mentioned earlier, the original focus of Dreambooth was the selection of rare
 Alternatively, one might use the real name of their subject, or a 'similar enough' celebrity.
 
 After a number of training experiments, it seems as though a 'similar enough' celebrity is the best choice, especially if prompting the model for the person's real name ends up looking dissimilar.
+
+# Exponential moving average (EMA)
+
+A second model can be trained in parallel to your checkpoint, nearly for free - only the resulting system memory (by default) is consumed, rather than more VRAM.
+
+Applying `use_ema=true` in your config file will enable this feature.
+
+# CLIP score tracking
+
+If you wish to enable evaluations to score the model's performance, see [this document](/documentation/evaluation/CLIP_SCORES.md) for information on configuring and interpreting CLIP scores.
+
+# Stable evaluation loss
+
+If you wish to use stable MSE loss to score the model's performance, see [this document](/documentation/evaluation/EVAL_LOSS.md) for information on configuring and interpreting evaluation loss.
 
 # Refiner tuning
 
@@ -178,10 +261,10 @@ You'll need to update `cache_dir` in your dataloader configuration, `multidataba
 ]
 ```
 
-If you wish to target a specific aesthetic score with your data, you can add this to `config/config.env`:
+If you wish to target a specific aesthetic score with your data, you can add this to `config/config.json`:
 
 ```bash
-export TRAINER_EXTRA_ARGS="${TRAINER_EXTRA_ARGS} --data_aesthetic_score=5.6"
+"--data_aesthetic_score": 5.6,
 ```
 
 Update **5.6** to the score you would like to target. The default is **7.0**.
