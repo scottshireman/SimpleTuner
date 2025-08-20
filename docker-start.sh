@@ -54,7 +54,7 @@ if [[ -n "${JUPYTER_PASSWORD:-}" ]]; then
     --ip=0.0.0.0 \
     --port=8888 \
     --ServerApp.root_dir=/workspace \
-    --FileContentsManager.preferred_dir=/workspace/crop-n-caption \
+    --FileContentsManager.preferred_dir=/workspace/SimpleTuner \
     --IdentityProvider.token="${JUPYTER_PASSWORD}" \
     --ServerApp.allow_origin='*' \
     --ServerApp.terminado_settings='{"shell_command":["/bin/bash"]}'
