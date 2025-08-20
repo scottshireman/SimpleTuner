@@ -67,7 +67,7 @@ RUN pip3 install wandb
 RUN pip3 install ipyevents ipywidgets jupyter-archive jupyterlab
 
 # Clone SimpleTuner
-RUN git clone https://github.com/scottshireman/SimpleTuner --branch release
+RUN git clone https://github.com/bghira/SimpleTuner --branch release
 # RUN git clone https://github.com/bghira/SimpleTuner --branch main # Uncomment to use latest (possibly unstable) version
 
 ENV VIRTUAL_ENV=/workspace/SimpleTuner/.venv
