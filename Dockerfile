@@ -66,6 +66,9 @@ RUN pip3 install wandb
 # Jupyter notebooks
 RUN pip3 install ipyevents ipywidgets jupyter-archive jupyterlab
 
+# Install Poetry
+RUN pip3 install poetry
+
 # Clone SimpleTuner
 RUN git clone https://github.com/scottshireman/SimpleTuner --branch main
 # RUN git clone https://github.com/bghira/SimpleTuner --branch main # Uncomment to use latest (possibly unstable) version
@@ -79,9 +82,8 @@ RUN --mount=type=cache,target=/root/.cache/pip \
     #pip install -U xformers --index-url https://download.pytorch.org/whl/cu128 && \
 
 # Install SimpleTuner
-RUN pip3 install poetry
+
 RUN cd SimpleTuner && \
-    python3 -m venv ${VIRTUAL_ENV} && \
     poetry install --no-root
     
 RUN chmod +x SimpleTuner/train.sh
