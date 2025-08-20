@@ -75,12 +75,15 @@ ENV PATH="$VIRTUAL_ENV/bin:$PATH"
 
 RUN python3 -m venv ${VIRTUAL_ENV} && \
     pip3 install --pre torch torchvision --index-url https://download.pytorch.org/whl/cu128 # && \
-    pip3 install poetry
+    pip3 install poetry && \
+    cd SimpleTuner && \
+    poetry install --no-root
+    
     #pip install -U xformers --index-url https://download.pytorch.org/whl/cu128 && \
 
 # Install SimpleTuner
-RUN cd SimpleTuner && \
-    poetry install --no-root
+#RUN cd SimpleTuner && \
+#    poetry install --no-root
     
 RUN chmod +x SimpleTuner/train.sh
 
