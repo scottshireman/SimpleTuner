@@ -63,9 +63,6 @@ RUN pip3 install "huggingface_hub[cli]"
 # WanDB
 RUN pip3 install wandb
 
-# Jupyter notebooks
-RUN pip3 install ipyevents ipywidgets jupyter-archive jupyterlab
-
 # Clone SimpleTuner
 RUN git clone https://github.com/bghira/SimpleTuner --branch release
 # RUN git clone https://github.com/bghira/SimpleTuner --branch main # Uncomment to use latest (possibly unstable) version
@@ -75,9 +72,11 @@ ENV PATH="$VIRTUAL_ENV/bin:$PATH"
 
 RUN python3 -m venv ${VIRTUAL_ENV} && \
     pip3 install --pre torch torchvision --index-url https://download.pytorch.org/whl/cu128 # && \
+    pip3 install ipyevents ipywidgets jupyter-archive jupyterlab && \
     pip3 install poetry && \
     cd SimpleTuner && \
     poetry install --no-root
+    
     
     #pip install -U xformers --index-url https://download.pytorch.org/whl/cu128 && \
 
