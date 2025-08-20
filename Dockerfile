@@ -70,12 +70,24 @@ RUN pip3 install ipyevents ipywidgets jupyter-archive jupyterlab
 RUN git clone https://github.com/scottshireman/SimpleTuner --branch main
 # RUN git clone https://github.com/bghira/SimpleTuner --branch main # Uncomment to use latest (possibly unstable) version
 
+ENV VIRTUAL_ENV=/workspace/venv
+ENV PATH="$VIRTUAL_ENV/bin:$PATH"
+
+RUN --mount=type=cache,target=/root/.cache/pip \
+    python3 -m venv ${VIRTUAL_ENV} && \
+    pip3 install --pre torch torchvision --index-url https://download.pytorch.org/whl/cu128 # && \
+    #pip install -U xformers --index-url https://download.pytorch.org/whl/cu128 && \
+
 # Install SimpleTuner
 RUN pip3 install poetry
-RUN cd SimpleTuner && python3 -m venv .venv && poetry install --no-root
+RUN cd SimpleTuner && \
+    python3 -m venv ${VIRTUAL_ENV} && \
+    poetry install --no-root
+    
 RUN chmod +x SimpleTuner/train.sh
 
-RUN echo "source /workspace/SimpleTuner/.venv/bin/activate" >> /root/.bashrc
+RUN echo "source ${VIRTUAL_ENV}/bin/activate" >> /root/.bashrc
+# RUN echo "source /workspace/SimpleTuner/.venv/bin/activate" >> /root/.bashrc
 
 WORKDIR /workspace/SimpleTuner
 ADD docker-start.sh /
