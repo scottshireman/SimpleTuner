@@ -58,7 +58,7 @@ if [[ -n "${JUPYTER_PASSWORD:-}" ]]; then
     --ServerApp.terminado_settings='{"shell_command":["/bin/bash"]}' \
     --ServerApp.token="${JUPYTER_PASSWORD}" \
     --ServerApp.allow_origin='*' \
-    --ServerApp.preferred_dir=/workspace/crop-n-caption
+    --ServerApp.preferred_dir=/workspace/SimpleTuner
 else
   echo "Container started (no JUPYTER_PASSWORD set)"; exec sleep infinity
 fi
