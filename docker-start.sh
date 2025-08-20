@@ -44,23 +44,23 @@ fi
 if [[ -n "${JUPYTER_PASSWORD:-}" ]]; then
   echo "Starting JupyterLab"
 
-  # These can fail depending on lab/server versions; don't block startup
+  # These may be no-ops on Lab 4; don't fail if unsupported
   jupyter nbextension enable --py widgetsnbextension || true
   jupyter labextension disable "@jupyterlab/apputils-extension:announcements" || true
 
   exec jupyter lab \
     --allow-root \
     --no-browser \
-    --port=8888 \
     --ip=0.0.0.0 \
-    --ServerApp.iopub_msg_rate_limit=10000 \
-    --ServerApp.rate_limit_window=3.0 \
-    --ServerApp.terminado_settings='{"shell_command":["/bin/bash"]}' \
-    --ServerApp.token="${JUPYTER_PASSWORD}" \
+    --port=8888 \
+    --ServerApp.root_dir=/workspace \
+    --FileContentsManager.preferred_dir=/workspace/crop-n-caption \
+    --IdentityProvider.token="${JUPYTER_PASSWORD}" \
     --ServerApp.allow_origin='*' \
-    --ServerApp.preferred_dir=/workspace/SimpleTuner
+    --ServerApp.terminado_settings='{"shell_command":["/bin/bash"]}'
 else
-  echo "Container started (no JUPYTER_PASSWORD set)"; exec sleep infinity
+  echo "Container started (no JUPYTER_PASSWORD set)"
+  exec sleep infinity
 fi
 
 # 🫡
