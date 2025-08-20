@@ -28,7 +28,8 @@ service ssh start
 
 # Login to HF
 if [[ -n "${HF_TOKEN:-$HUGGING_FACE_HUB_TOKEN}" ]]; then
-	huggingface-cli login --token "${HF_TOKEN:-$HUGGING_FACE_HUB_TOKEN}" --add-to-git-credential
+	# huggingface-cli login --token "${HF_TOKEN:-$HUGGING_FACE_HUB_TOKEN}" --add-to-git-credential
+ 	hf auth login --token "${HF_TOKEN:-$HUGGING_FACE_HUB_TOKEN}" --add-to-git-credential
 else
 	echo "HF_TOKEN or HUGGING_FACE_HUB_TOKEN not set; skipping login"
 fi
@@ -40,17 +41,26 @@ else
 	echo "WANDB_API_KEY or WANDB_TOKEN not set; skipping login"
 fi
 
-# RunPod JupyterLab
-if [[ $JUPYTER_PASSWORD ]]
-then
-	echo "Starting Jupyter notebooks"
-	jupyter nbextension enable --py widgetsnbextension
-	jupyter labextension disable "@jupyterlab/apputils-extension:announcements"
-	jupyter lab --allow-root --no-browser --port=8888 --ip=* --ServerApp.terminado_settings='{"shell_command":["/bin/bash"]}' --ServerApp.token=$JUPYTER_PASSWORD --ServerApp.allow_origin=* --ServerApp.preferred_dir=/workspace
-	echo "Jupyter started"
+if [[ -n "${JUPYTER_PASSWORD:-}" ]]; then
+  echo "Starting JupyterLab"
+
+  # These can fail depending on lab/server versions; don't block startup
+  jupyter nbextension enable --py widgetsnbextension || true
+  jupyter labextension disable "@jupyterlab/apputils-extension:announcements" || true
+
+  exec jupyter lab \
+    --allow-root \
+    --no-browser \
+    --port=8888 \
+    --ip=0.0.0.0 \
+    --ServerApp.iopub_msg_rate_limit=10000 \
+    --ServerApp.rate_limit_window=3.0 \
+    --ServerApp.terminado_settings='{"shell_command":["/bin/bash"]}' \
+    --ServerApp.token="${JUPYTER_PASSWORD}" \
+    --ServerApp.allow_origin='*' \
+    --ServerApp.preferred_dir=/workspace/crop-n-caption
 else
-	echo "Container Started"
-	sleep infinity
+  echo "Container started (no JUPYTER_PASSWORD set)"; exec sleep infinity
 fi
 
 # 🫡
