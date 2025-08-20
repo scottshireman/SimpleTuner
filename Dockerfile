@@ -70,14 +70,34 @@ RUN pip3 install ipyevents ipywidgets jupyter-archive jupyterlab
 RUN git clone https://github.com/bghira/SimpleTuner --branch release
 # RUN git clone https://github.com/bghira/SimpleTuner --branch main # Uncomment to use latest (possibly unstable) version
 
+#ENV VIRTUAL_ENV=/workspace/SimpleTuner/.venv
+#ENV PATH="$VIRTUAL_ENV/bin:$PATH"
+
+#RUN python3 -m venv ${VIRTUAL_ENV} && \
+#    pip3 install --pre torch torchvision --index-url https://download.pytorch.org/whl/cu128 # && \
+#    pip3 install poetry && \
+#    cd SimpleTuner && \
+#    poetry install --no-root
+
 ENV VIRTUAL_ENV=/workspace/SimpleTuner/.venv
 ENV PATH="$VIRTUAL_ENV/bin:$PATH"
 
-RUN python3 -m venv ${VIRTUAL_ENV} && \
-    pip3 install --pre torch torchvision --index-url https://download.pytorch.org/whl/cu128 # && \
-    pip3 install poetry && \
+RUN python3 -m venv "${VIRTUAL_ENV}" && \
+    "${VIRTUAL_ENV}/bin/python" -m pip install --upgrade pip && \
+    "${VIRTUAL_ENV}/bin/python" -m pip install \
+        --index-url https://download.pytorch.org/whl/cu128 \
+        "torch==2.7.1+cu128" "torchvision==0.22.1+cu128" && \
+    "${VIRTUAL_ENV}/bin/python" -m pip install jupyterlab ipykernel poetry && \
     cd SimpleTuner && \
-    poetry install --no-root
+    poetry config virtualenvs.create false && \
+    poetry install --no-root && \
+    "${VIRTUAL_ENV}/bin/python" -m ipykernel install \
+        --name simpletuner \
+        --display-name "Python (SimpleTuner venv)" \
+        --sys-prefix
+
+
+    
 
     #pip install -U xformers --index-url https://download.pytorch.org/whl/cu128 && \
 
