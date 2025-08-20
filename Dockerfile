@@ -1,6 +1,7 @@
 
 # SimpleTuner needs CU141
-FROM nvidia/cuda:12.4.1-cudnn-devel-ubuntu22.04
+#FROM nvidia/cuda:12.4.1-cudnn-devel-ubuntu22.04
+FROM nvidia/cuda:12.8.0-cudnn-devel-ubuntu22.04
 
 # /workspace is the default volume for Runpod & other hosts
 WORKDIR /workspace
