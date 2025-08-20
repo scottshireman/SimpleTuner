@@ -1,3 +1,4 @@
+
 # SimpleTuner needs CU141
 FROM nvidia/cuda:12.4.1-cudnn-devel-ubuntu22.04
 
@@ -72,6 +73,8 @@ RUN git clone https://github.com/scottshireman/SimpleTuner --branch main
 RUN pip3 install poetry
 RUN cd SimpleTuner && python3 -m venv .venv && poetry install --no-root
 RUN chmod +x SimpleTuner/train.sh
+
+RUN echo "source /workspace/SimpleTuner/bin/activate" >> /root/.bashrc
 
 WORKDIR /workspace/SimpleTuner
 ADD docker-start.sh /
