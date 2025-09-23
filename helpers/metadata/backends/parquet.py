@@ -646,6 +646,33 @@ class ParquetMetadataBackend(MetadataBackend):
         return aspect_ratio_bucket_indices
 
     def __len__(self):
+        def repeat_len(bucket):
+            return len(bucket) * (self.repeats + 1)
+    
+        bucket_stats = {
+            ar: repeat_len(bucket)
+            for ar, bucket in self.aspect_ratio_bucket_indices.items()
+        }
+    
+        logger.info(
+            f"[ParquetMetadataBackend:{self.id}] Bucket sizes (after repeats): {bucket_stats} "
+            f"(batch_size={self.batch_size})"
+        )
+    
+        valid_buckets = {
+            ar: size for ar, size in bucket_stats.items() if size >= self.batch_size
+        }
+    
+        logger.info(
+            f"[ParquetMetadataBackend:{self.id}] Buckets contributing to length: {valid_buckets}"
+        )
+    
+        return sum(
+            (size + (self.batch_size - 1)) // self.batch_size
+            for size in valid_buckets.values()
+        )
+
+    def _old_len(self):
         """
         Count how many full batches we can form with the aspect_ratio_bucket_indices.
         """
