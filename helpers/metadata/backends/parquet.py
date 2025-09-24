@@ -89,6 +89,18 @@ class ParquetMetadataBackend(MetadataBackend):
                 f"Missing captions for {len(self.missing_captions)} images: {self.missing_captions}"
             )
             self._remove_images_with_missing_captions()
+            
+        # --- PATCH START: Ensure at least one full batch, even for tiny datasets ---
+        total_files = sum(len(b) for b in self.aspect_ratio_bucket_indices.values())
+        if total_files > 0 and total_files * (self.repeats + 1) < self.batch_size:
+            needed = (self.batch_size + total_files - 1) // total_files  # ceil division
+            logger.warning(
+                f"[ParquetMetadataBackend:{self.id}] Increasing repeats from {self.repeats} "
+                f"to {needed-1} so that {total_files} files can fill at least one batch "
+                f"(batch_size={self.batch_size})."
+            )
+            self.repeats = needed - 1
+        # --- PATCH END ---
 
     def _remove_images_with_missing_captions(self):
         """
