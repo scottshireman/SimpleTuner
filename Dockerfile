@@ -89,7 +89,7 @@ RUN python3 -m venv "${VIRTUAL_ENV}" && \
     "${VIRTUAL_ENV}/bin/python" -m pip install \
         --index-url https://download.pytorch.org/whl/cu128 \
         "torch==2.7.1+cu128" "torchvision==0.22.1+cu128" && \
-    "${VIRTUAL_ENV}/bin/python" -m pip install jupyterlab ipykernel poetry pyarrow && \
+    "${VIRTUAL_ENV}/bin/python" -m pip install jupyterlab ipykernel poetry && \
     cd SimpleTuner && \
     poetry config virtualenvs.create false && \
     poetry install --no-root && \
