@@ -67,7 +67,9 @@ RUN pip3 install wandb
 RUN pip3 install ipyevents ipywidgets jupyter-archive jupyterlab
 
 # Clone SimpleTuner
-RUN git clone https://github.com/bghira/SimpleTuner --branch release
+#RUN git clone https://github.com/bghira/SimpleTuner --branch release
+RUN git clone https://github.com/scottshireman/SimpleTuner --branch release
+
 # RUN git clone https://github.com/bghira/SimpleTuner --branch main # Uncomment to use latest (possibly unstable) version
 
 #ENV VIRTUAL_ENV=/workspace/SimpleTuner/.venv
@@ -87,7 +89,7 @@ RUN python3 -m venv "${VIRTUAL_ENV}" && \
     "${VIRTUAL_ENV}/bin/python" -m pip install \
         --index-url https://download.pytorch.org/whl/cu128 \
         "torch==2.7.1+cu128" "torchvision==0.22.1+cu128" && \
-    "${VIRTUAL_ENV}/bin/python" -m pip install jupyterlab ipykernel poetry && \
+    "${VIRTUAL_ENV}/bin/python" -m pip install jupyterlab ipykernel poetry pyarrow && \
     cd SimpleTuner && \
     poetry config virtualenvs.create false && \
     poetry install --no-root && \
