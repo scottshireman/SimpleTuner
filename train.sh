@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 
+cd /workspace/SimpleTuner || exit 1
+
 # Pull config from config.env
 [ -f "config/config.env" ] && source config/config.env
 
